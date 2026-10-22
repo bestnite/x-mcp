@@ -1,13 +1,37 @@
 {
   "name": "x-mcp",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
-  "description": "Read-only MCP server for X (Twitter) internal GraphQL API",
+  "description": "Read-only MCP server for X (Twitter) via its internal GraphQL API",
   "license": "MIT",
+  "bin": {
+    "x-mcp": "dist/stdio.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "docs"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "mcp",
+    "twitter",
+    "x",
+    "model-context-protocol",
+    "graphql"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://git.nite07.com/nite/x-mcp.git"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build",
+    "prepare": "npm run build",
     "start": "node dist/index.js",
+    "start:stdio": "node dist/stdio.js",
     "test": "vitest run",
     "test:watch": "vitest"
   },
