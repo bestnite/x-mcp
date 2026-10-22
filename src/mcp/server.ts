@@ -4,11 +4,20 @@
  * 设计上刻意只做读：QuaX/Squawker 这类客户端本身也不提供写操作，
  * 写接口没有经过验证的参考实现，不做半成品。
  */
+import { readFileSync } from 'node:fs';
+
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
 import type { XApi } from '../x/api.js';
 import { XError, XRateLimitError, type XErrorCode } from '../x/auth.js';
+
+// 版本号只有 package.json 一处，避免发版后 serverInfo 还报旧版本。
+// dist/mcp/server.js 与 src/mcp/server.ts 到包根都是两级，发布后该文件一定在包内。
+const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as {
+  name: string;
+  version: string;
+};
 
 const json = (value: unknown) => ({
   content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }],
@@ -115,7 +124,7 @@ function failure(error: unknown) {
 export function createServer(api: XApi): McpServer {
   const server = new McpServer({
     name: 'x-mcp',
-    version: '0.1.0',
+    version: pkg.version,
   });
 
   server.registerTool(
