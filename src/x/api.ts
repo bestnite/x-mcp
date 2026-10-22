@@ -28,7 +28,7 @@ export class XApi {
       withSafetyModeUserFields: true,
     });
     const user = parseUserResult(data?.user?.result);
-    if (!user) throw new XError(`User @${clean} not found or the response shape changed.`);
+    if (!user) throw new XError('not_found', `User @${clean} was not found (it may not exist, be suspended, or the response shape changed).`);
     return user;
   }
 
@@ -59,7 +59,7 @@ export class XApi {
     const userResult = data?.user?.result;
     const instructions =
       userResult?.timeline?.timeline?.instructions ?? userResult?.timeline_v2?.timeline?.instructions;
-    if (!instructions) throw new XError('UserTweets returned no timeline (protected account or changed shape).');
+    if (!instructions) throw new XError('upstream', 'UserTweets returned no timeline (protected account or changed shape).');
     const page = parseTimelineInstructions(instructions);
     return { tweets: page.tweets.slice(0, limit), nextCursor: page.nextCursor };
   }
@@ -90,7 +90,7 @@ export class XApi {
     });
 
     const instructions = data?.search_by_raw_query?.search_timeline?.timeline?.instructions;
-    if (!instructions) throw new XError('SearchTimeline returned no timeline.');
+    if (!instructions) throw new XError('upstream', 'SearchTimeline returned no timeline.');
     const page = parseTimelineInstructions(instructions);
     return { tweets: page.tweets.slice(0, limit), nextCursor: page.nextCursor };
   }
@@ -111,7 +111,7 @@ export class XApi {
     });
 
     const instructions = data?.threaded_conversation_with_injections_v2?.instructions;
-    if (!instructions) throw new XError('TweetDetail returned no conversation.');
+    if (!instructions) throw new XError('upstream', 'TweetDetail returned no conversation.');
     const page = parseTimelineInstructions(instructions);
 
     const tweet = page.tweets.find((t) => t.id === tweetId) ?? page.tweets[0] ?? null;
@@ -123,6 +123,11 @@ export class XApi {
   async getTrends(woeid = 1): Promise<Trend[]> {
     const payload = await this.client.rest<unknown>('/1.1/trends/place.json', { id: woeid });
     return parseTrendsRest(payload);
+  }
+
+  /** cookie 健康检查：agent 可以在调用别的工具前先问「我还能用吗」。 */
+  async checkAuth(): Promise<{ ok: boolean; code?: string; message?: string }> {
+    return this.client.probeSession();
   }
 }
 

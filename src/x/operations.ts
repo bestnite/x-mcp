@@ -72,6 +72,7 @@ export class OperationsRegistry {
       const retried = this.ops.get(name);
       if (!retried) {
         throw new XError(
+          'query_stale',
           `Operation ${name} is not present in the current bundle (${this.ops.size} operations extracted). X may have removed or renamed it.`,
         );
       }
@@ -89,7 +90,7 @@ export class OperationsRegistry {
       const bundle = await this.fetchMainBundle();
       const ops = extractOperations(bundle);
       if (ops.size === 0) {
-        throw new XError('No operations found in main.js — the bundle layout changed.');
+        throw new XError('query_stale', 'No operations found in main.js — the bundle layout changed.');
       }
       this.ops = ops;
       this.loadedAt = Date.now();
@@ -107,23 +108,25 @@ export class OperationsRegistry {
 
   /** 首页 → main.js。两步都必须带 cookie，否则拿到的是登录墙。 */
   private async fetchMainBundle(): Promise<string> {
+    // 登录墙（307 → 引导页）也有 main.js，所以这里跟随后照常解析；
+    // cookie 是否有效由 probeSession 和真实 API 调用的 401 判断，不在这里猜。
     const home = await this.fetcher(HOME_URL, {
       headers: webHeaders(this.cookies),
       redirect: 'follow',
     });
     if (!home.ok) {
-      throw new XError(`GET ${HOME_URL} returned HTTP ${home.status}`, home.status);
+      throw new XError('upstream', `GET ${HOME_URL} returned HTTP ${home.status}`, home.status);
     }
     const html = await home.text();
 
     const bundleUrl = [...new Set([...html.matchAll(MAIN_BUNDLE_RE)].map((m) => m[0]))][0];
     if (!bundleUrl) {
-      throw new XError('Could not find main.js in the x.com homepage — the page layout changed.');
+      throw new XError('query_stale', 'Could not find main.js in the x.com homepage — the page layout changed.');
     }
 
     const bundle = await this.fetcher(bundleUrl, { headers: webHeaders(this.cookies) });
     if (!bundle.ok) {
-      throw new XError(`GET ${bundleUrl} returned HTTP ${bundle.status}`, bundle.status);
+      throw new XError('upstream', `GET ${bundleUrl} returned HTTP ${bundle.status}`, bundle.status);
     }
     return bundle.text();
   }

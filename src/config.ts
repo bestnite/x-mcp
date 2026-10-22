@@ -7,6 +7,8 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+import { XError } from './x/auth.js';
+
 export interface SessionCookies {
   authToken: string;
   ct0: string;
@@ -49,8 +51,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const authToken = pick('auth_token') ?? pick('X_AUTH_TOKEN');
   const ct0 = pick('ct0') ?? pick('X_CSRF_TOKEN');
   if (!authToken || !ct0) {
-    throw new Error(
-      `Missing session cookies. Provide auth_token and ct0 in ${file} (mode 600) or via X_AUTH_TOKEN / X_CSRF_TOKEN.`,
+    throw new XError(
+      'auth_missing',
+      `No X session configured: auth_token and ct0 are missing from ${file} (and from X_AUTH_TOKEN / X_CSRF_TOKEN).`,
     );
   }
 

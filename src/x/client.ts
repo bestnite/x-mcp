@@ -19,6 +19,9 @@ import {
   XGraphqlError,
   XRateLimitError,
   apiHeaders,
+  extractXCode,
+  webHeaders,
+  type XErrorCode,
 } from './auth.js';
 import { OperationsRegistry } from './operations.js';
 
@@ -27,6 +30,8 @@ type Failure = {
   kind: 'auth' | 'stale' | 'rate' | 'error';
   status: number;
   body: string;
+  /** X 错误体里的数字 code，用来区分同一状态码下的不同原因（353=csrf 不匹配等） */
+  xCode?: number;
   resetAt?: Date;
 };
 
@@ -69,10 +74,22 @@ export class XClient {
         return tx;
       } catch (error) {
         if (error instanceof SourceFetchError) {
-          throw new XError(`Could not fetch x.com to build the signer: ${error.message}`, error.statusCode);
+          // cookie 失效时连签名器都建不起来：这在用户看来是「登录过期」，不是「代码坏了」
+          if (error.statusCode === 401 || error.statusCode === 403) {
+            throw new XAuthError(
+              'auth_expired',
+              `x.com rejected the session while building the signer (HTTP ${error.statusCode}) — the cookies are no longer valid.`,
+              error.statusCode,
+            );
+          }
+          throw new XError(
+            'signer_broken',
+            `Could not fetch x.com to build the signer: ${error.message}`,
+            error.statusCode,
+          );
         }
         if (error instanceof ClientTransactionIdError) {
-          throw new XError(`The transaction-id signer broke: ${error.message}`);
+          throw new XError('signer_broken', `The transaction-id signer broke: ${error.message}`);
         }
         throw error;
       }
@@ -82,6 +99,72 @@ export class XClient {
       return await this.transactionLoading;
     } finally {
       this.transactionLoading = null;
+    }
+  }
+
+  /**
+   * 准备阶段（取 queryId、建签名器）失败时，判断是不是 cookie 失效导致的。
+   * 是的话把「页面结构变了」改写成 auth_expired——这个区别决定 agent 让用户换 cookie 还是找维护者。
+   */
+  private async enrichAuthError(error: unknown): Promise<unknown> {
+    if (error instanceof XAuthError) return error;
+    if (!(error instanceof XError)) return error;
+    if (error.code === 'auth_expired' || error.code === 'auth_csrf') return error;
+
+    const probe = await this.probeSession().catch(() => null);
+    if (probe && !probe.ok && probe.code === 'auth_expired') {
+      return new XAuthError(
+        'auth_expired',
+        `${probe.message} The request could not even be prepared: ${error.message}`,
+        401,
+      );
+    }
+    return error;
+  }
+
+  // --- 会话探测 ---
+
+  /**
+   * 只检查 cookie 是否还有效：请求 x.com/home（不需要签名器，不需要 tid）。
+   *
+   * 判断依据是状态码而不是内容：已登录时 /home 直接 200，
+   * 未登录时 X 回 307 跳到 /i/jf/onboarding/... 登录页——跟随后再看内容会误判成"有效"。
+   */
+  async probeSession(): Promise<{ ok: true } | { ok: false; code: XErrorCode; message: string }> {
+    try {
+      const res = await this.fetcher('https://x.com/home', {
+        headers: webHeaders(this.config.cookies),
+        redirect: 'manual',
+      });
+
+      if (res.status === 200) return { ok: true };
+
+      if (res.status === 301 || res.status === 302 || res.status === 303 || res.status === 307 || res.status === 308) {
+        const location = res.headers.get('location') ?? '';
+        return {
+          ok: false,
+          code: 'auth_expired',
+          message: `x.com redirected /home to ${location || 'a login page'} instead of serving the timeline — the session cookies are no longer valid.`,
+        };
+      }
+      if (res.status === 401 || res.status === 403) {
+        return {
+          ok: false,
+          code: 'auth_expired',
+          message: `x.com returned HTTP ${res.status} for /home — the session cookies are no longer valid.`,
+        };
+      }
+      return {
+        ok: false,
+        code: 'upstream',
+        message: `x.com returned HTTP ${res.status} for /home.`,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        code: 'upstream',
+        message: `Could not reach x.com: ${error instanceof Error ? error.message : String(error)}`,
+      };
     }
   }
 
@@ -115,22 +198,48 @@ export class XClient {
 
   /** 把失败结果翻译成带语义的异常。返回而非抛出，避免依赖 never 的控制流窄化。 */
   private toError(attempt: Attempt<unknown>, what: string, context?: string): XError {
-    if (attempt.ok) return new XGraphqlError(`${what} unexpectedly succeeded`);
+    if (attempt.ok) return new XGraphqlError('upstream', `${what} unexpectedly succeeded`);
     const suffix = context ? ` (${context})` : '';
+
     switch (attempt.kind) {
-      case 'auth':
-        return new XAuthError(
-          `${what} returned HTTP ${attempt.status}${suffix}. The auth_token/ct0 cookies are expired or the account is restricted.`,
-          attempt.status,
-        );
+      case 'auth': {
+        if (attempt.status === 401) {
+          return new XAuthError(
+            'auth_expired',
+            `${what} returned HTTP 401${suffix}: the session cookie is no longer accepted.`,
+            401,
+          );
+        }
+        if (attempt.xCode === 353) {
+          return new XAuthError(
+            'auth_csrf',
+            `${what} returned HTTP 403${suffix}: csrf token (ct0) does not match auth_token.`,
+            403,
+          );
+        }
+        const reason =
+          attempt.xCode === 326
+            ? 'the account is temporarily locked'
+            : attempt.xCode === 64
+              ? 'the account is suspended'
+              : 'the account is not allowed to perform this request';
+        return new XAuthError('auth_restricted', `${what} returned HTTP 403${suffix}: ${reason}.`, 403);
+      }
       case 'rate':
         return new XRateLimitError(
           `${what} hit the rate limit${attempt.resetAt ? `; resets at ${attempt.resetAt.toISOString()}` : ''}.`,
           attempt.resetAt,
         );
-      default:
+      case 'stale':
         return new XGraphqlError(
-          `${what} returned HTTP ${attempt.status}${suffix}: ${attempt.body.slice(0, 240)}`,
+          'query_stale',
+          `${what} returned HTTP ${attempt.status}${suffix} even after refreshing the queryId table and rebuilding the signer: ${attempt.body.slice(0, 200)}`,
+          attempt.status,
+        );
+      default:
+        return new XError(
+          'upstream',
+          `${what} returned HTTP ${attempt.status}${suffix}: ${attempt.body.slice(0, 200)}`,
           attempt.status,
         );
     }
@@ -140,8 +249,22 @@ export class XClient {
     operationName: string,
     variables: Record<string, unknown>,
   ): Promise<Attempt<T>> {
-    const op = await this.operations.get(operationName);
-    const tx = await this.getTransaction();
+    // operations / 签名器都依赖 x.com 的页面：cookie 失效时它们会以"结构变了"的形式失败。
+    // 准备阶段的异常先探一次会话，把归因校正到认证上，否则 agent 会以为是代码坏了。
+    let op;
+    try {
+      op = await this.operations.get(operationName);
+    } catch (error) {
+      throw await this.enrichAuthError(error);
+    }
+
+    let tx;
+    try {
+      tx = await this.getTransaction();
+    } catch (error) {
+      throw await this.enrichAuthError(error);
+    }
+
     const path = `/i/api/graphql/${op.queryId}/${op.operationName}`;
 
     const query = new URLSearchParams({
@@ -173,7 +296,12 @@ export class XClient {
     const url = new URL(`https://x.com${REST_BASE}${path}`);
     for (const [key, value] of Object.entries(params)) url.searchParams.set(key, String(value));
 
-    const tx = await this.getTransaction();
+    let tx;
+    try {
+      tx = await this.getTransaction();
+    } catch (error) {
+      throw await this.enrichAuthError(error);
+    }
     const res = await this.fetcher(url.toString(), {
       headers: apiHeaders(this.config.cookies, tx.generateTransactionId('GET', path)),
     });
@@ -188,7 +316,9 @@ export class XClient {
 
 function classify(res: Response, body: string): Failure {
   const status = res.status;
-  if (status === 401 || status === 403) return { ok: false, kind: 'auth', status, body };
+  if (status === 401 || status === 403) {
+    return { ok: false, kind: 'auth', status, body, xCode: extractXCode(body) };
+  }
   if (status === 429) {
     const reset = res.headers.get('x-rate-limit-reset');
     return {
@@ -196,9 +326,12 @@ function classify(res: Response, body: string): Failure {
       kind: 'rate',
       status,
       body,
+      xCode: extractXCode(body),
       resetAt: reset ? new Date(Number(reset) * 1000) : undefined,
     };
   }
-  if (status === 404 || status === 422) return { ok: false, kind: 'stale', status, body };
-  return { ok: false, kind: 'error', status, body };
+  if (status === 404 || status === 422) {
+    return { ok: false, kind: 'stale', status, body, xCode: extractXCode(body) };
+  }
+  return { ok: false, kind: 'error', status, body, xCode: extractXCode(body) };
 }

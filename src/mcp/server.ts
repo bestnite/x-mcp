@@ -8,38 +8,107 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
 import type { XApi } from '../x/api.js';
-import { XAuthError, XError, XRateLimitError } from '../x/auth.js';
+import { XError, XRateLimitError, type XErrorCode } from '../x/auth.js';
 
 const json = (value: unknown) => ({
   content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }],
 });
 
-/** 异常 → 工具错误：保留可读信息，让 agent 知道是该重试、换凭证还是等。 */
+/**
+ * 异常 → 工具错误。调用方是 agent，所以每条错误都回答三件事：
+ * 什么意思、谁能修、要不要重试。agent 会把这段转述给用户。
+ */
+const HINTS: Record<
+  XErrorCode,
+  { meaning: string; action: string; retryable: boolean }
+> = {
+  auth_missing: {
+    meaning: 'The MCP server has no X session configured at all.',
+    action:
+      "The user must add auth_token and ct0 to the server's .env (mode 600) and restart it. Nothing the agent can do will fix this.",
+    retryable: false,
+  },
+  auth_expired: {
+    meaning:
+      'The stored X session cookie is no longer accepted. X does not refresh auth_token in responses, so this cannot self-heal.',
+    action:
+      'Ask the user to: log in to x.com in a browser, open DevTools → Application → Cookies → x.com, copy auth_token and ct0, replace both values in the server\'s .env, then restart the server.',
+    retryable: false,
+  },
+  auth_csrf: {
+    meaning:
+      'auth_token and ct0 no longer belong to the same session — usually only one of the two was updated.',
+    action:
+      'Ask the user to copy BOTH auth_token and ct0 from the same browser session and replace both in .env, then restart the server.',
+    retryable: false,
+  },
+  auth_restricted: {
+    meaning: 'The account is authenticated but X is refusing the request (locked, suspended, or permission denied).',
+    action:
+      'The user must resolve it on x.com (unlock via email/SMS, or appeal a suspension). Replacing cookies will not help.',
+    retryable: false,
+  },
+  rate_limited: {
+    meaning: 'X rate-limited this account for this endpoint.',
+    action: 'Wait until the reset time shown above, then retry. Retrying earlier extends the block.',
+    retryable: true,
+  },
+  query_stale: {
+    meaning:
+      "The queryId was refreshed and the request still failed. X most likely renamed or removed the operation the server depends on.",
+    action:
+      'This needs a maintainer: check docs/endpoints.md and docs/reverse-engineering.md. Retrying or changing arguments will not help.',
+    retryable: false,
+  },
+  signer_broken: {
+    meaning: 'The x-client-transaction-id signer could not be rebuilt from x.com — X probably changed its signing chain.',
+    action:
+      'This needs a maintainer: see docs/reverse-engineering.md §7 (maintenance playbook). Not an argument or credential problem.',
+    retryable: false,
+  },
+  not_found: {
+    meaning: 'The target (user or post) does not exist, was deleted, or is not visible to this account.',
+    action: 'Double-check the handle or post id. Try a different one; do not retry the same value.',
+    retryable: false,
+  },
+  upstream: {
+    meaning: 'A transient network or upstream failure, or an unexpected response shape.',
+    action: 'Retrying once is reasonable. If it persists, report it with this message.',
+    retryable: true,
+  },
+};
+
 function failure(error: unknown) {
-  if (error instanceof XAuthError) {
+  if (!(error instanceof XError)) {
     return {
       isError: true,
       content: [
         {
           type: 'text' as const,
-          text: `Authentication failed: ${error.message}\nThe session cookies (auth_token/ct0) are expired. Refresh them from a logged-in browser.`,
+          text: `[err.unexpected]\n${String(error)}\n\nMeaning: the server hit an error it does not classify.\nAction: report this message as-is.`,
         },
       ],
     };
   }
-  if (error instanceof XRateLimitError) {
-    const when = error.resetAt ? ` Retry after ${error.resetAt.toISOString()}.` : '';
-    return {
-      isError: true,
-      content: [{ type: 'text' as const, text: `Rate limited by X.${when}` }],
-    };
-  }
-  if (error instanceof XError) {
-    return { isError: true, content: [{ type: 'text' as const, text: error.message }] };
-  }
+
+  const hint = HINTS[error.code];
+  const reset =
+    error instanceof XRateLimitError && error.resetAt ? `\nRate limit resets at: ${error.resetAt.toISOString()}` : '';
+
   return {
     isError: true,
-    content: [{ type: 'text' as const, text: `Unexpected failure: ${String(error)}` }],
+    content: [
+      {
+        type: 'text' as const,
+        text: [
+          `[err.${error.code}] ${error.message}`,
+          '',
+          `Meaning: ${hint.meaning}`,
+          `Action: ${hint.action}`,
+          `Retryable: ${hint.retryable ? 'yes' : 'no — do not call this tool again until the action above is done'}`,
+        ].join('\n') + reset,
+      },
+    ],
   };
 }
 
@@ -48,6 +117,31 @@ export function createServer(api: XApi): McpServer {
     name: 'x-mcp',
     version: '0.1.0',
   });
+
+  server.registerTool(
+    'x_auth_status',
+    {
+      title: 'Check the X session',
+      description:
+        "Health check for the configured X session: reports whether the stored cookies still work, and if not, what the user has to do. Call this first when another tool fails — it tells 'cookies expired' apart from 'endpoint broke'.",
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const status = await api.checkAuth();
+        if (status.ok) {
+          return json({
+            ok: true,
+            authenticated: true,
+            message: 'The stored X session is valid; read tools should work.',
+          });
+        }
+        return failure(new XError(status.code as XErrorCode, status.message ?? 'Session check failed.'));
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  );
 
   server.registerTool(
     'x_user_lookup',

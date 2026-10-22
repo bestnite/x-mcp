@@ -23,7 +23,8 @@ const call = async (name, args) => {
   let summary = '';
   try {
     const parsed = JSON.parse(text);
-    if (parsed.username) summary = `@${parsed.username} followers=${parsed.followers} tweets=${parsed.tweets}`;
+    if (parsed.ok !== undefined) summary = `ok=${parsed.ok}`;
+    else if (parsed.username) summary = `@${parsed.username} followers=${parsed.followers} tweets=${parsed.tweets}`;
     else if (parsed.tweets && Array.isArray(parsed.tweets)) summary = `tweets=${parsed.tweets.length}`;
     else if (parsed.trends) summary = `trends=${parsed.trends.length}`;
     else if (parsed.tweet !== undefined) summary = `replies=${parsed.replies?.length ?? 0}`;
@@ -35,6 +36,7 @@ const call = async (name, args) => {
   return { result, text };
 };
 
+await call('x_auth_status', {});
 await call('x_user_lookup', { username: 'X' });
 await call('x_user_tweets', { username: '@X', limit: 3 });
 await call('x_home_timeline', { limit: 3 });

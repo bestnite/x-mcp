@@ -9,6 +9,7 @@ Credentials are the account owner's own browser session (`auth_token` + `ct0`).
 
 | Tool | What it returns |
 |---|---|
+| `x_auth_status` | whether the stored session still works; says who has to fix it when it does not |
 | `x_user_lookup` | profile by handle: bio, follower/following/post counts, verification, join date, avatar & banner |
 | `x_user_tweets` | a user's recent posts, retweets nested |
 | `x_home_timeline` | the authenticated account's "For you" feed |
@@ -20,13 +21,50 @@ Every tool is read-only. Writes (post, like, bookmark) are deliberately absent: 
 QuaX and Squawker keep those local-only, so there is no verified reference implementation to
 follow.
 
+## Error semantics
+
+The caller is an agent, so every failure answers three questions: what happened, who can
+fix it, and whether retrying helps.
+
+```
+[err.auth_expired] x.com redirected /home to /i/jf/onboarding/web?… — the session cookies are no longer valid.
+
+Meaning: The stored X session cookie is no longer accepted. X does not refresh auth_token
+         in responses, so this cannot self-heal.
+Action:  Ask the user to: log in to x.com in a browser, open DevTools → Application →
+         Cookies → x.com, copy auth_token and ct0, replace both values in the server's .env,
+         then restart the server.
+Retryable: no — do not call this tool again until the action above is done
+```
+
+| Code | Who can fix it |
+|---|---|
+| `auth_missing`, `auth_expired`, `auth_csrf` | the user — refresh cookies, restart the server |
+| `auth_restricted` | the user — unlock or appeal on x.com; new cookies will not help |
+| `rate_limited` | nobody — wait for the reset time in the message |
+| `query_stale`, `signer_broken` | a maintainer — X changed its frontend (see the docs) |
+| `not_found` | nobody — the handle or post id is wrong |
+| `upstream` | retry once, then report |
+
+None of these are guesses about intent: `auth_*` means a retry is guaranteed to fail,
+`upstream` means it might succeed.
+
+**A trap worth knowing:** X answers an invalid cookie with a **307 to a login page**, not a
+401. Following that redirect yields a `200` login page, which looks exactly like "the page
+layout changed". So the server checks status codes before parsing, and when preparation
+(queryId extraction or signer build) fails, it probes the session first and attributes the
+failure to auth if that is the real cause.
+
+`x_auth_status` is the cheap way to ask the same question on purpose: it requests
+`x.com/home` with the stored cookies and reports the redirect, without building the signer.
+
 ## Status
 
 | Part | State |
 |---|---|
 | `src/tid/` — `x-client-transaction-id` signer | ✅ byte-for-byte verified against recorded fixtures |
-| `src/x/` — GraphQL + legacy REST client, queryId auto-discovery | ✅ all six endpoints verified live (2026-10-23) |
-| `src/mcp/` — MCP tools over streamable HTTP | ✅ end-to-end smoke test passes |
+| `src/x/` — GraphQL + legacy REST client, queryId auto-discovery | ✅ all six read endpoints verified live (2026-10-23) |
+| `src/mcp/` — MCP tools over streamable HTTP | ✅ seven tools, end-to-end smoke test passes |
 | Tests | ✅ 30 unit tests, no network required |
 
 ## Quick start

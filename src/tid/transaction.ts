@@ -143,6 +143,8 @@ export class ClientTransaction {
 
 /** 默认的文本抓取器：失败一律抛 SourceFetchError，不冒充签名错误。 */
 async function fetchText(url: string): Promise<string> {
+  // 注意：不跟随与不判断登录态都无所谓——签名器只依赖页面里的 meta key 和动画帧，
+  // 游客登录页同样有这些，所以 /home 被 307 跳到登录页时仍然能正常构建。
   const response = await globalThis.fetch(url, { headers: BROWSER_HEADERS });
   if (!response.ok) {
     throw new SourceFetchError(`GET ${url} returned HTTP ${response.status}`, response.status);
