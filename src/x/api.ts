@@ -95,12 +95,22 @@ export class XApi {
     return { tweets: page.tweets.slice(0, limit), nextCursor: page.nextCursor };
   }
 
-  /** 推文详情：焦点推文 + 其下的回复/引用会话。 */
-  async getTweetDetail(tweetId: string, limit = 20): Promise<{ tweet: Tweet | null; replies: Tweet[] }> {
+  /**
+   * 推文详情：焦点推文 + 其下的回复/引用会话，支持翻页。
+   *
+   * 分页变量名是 `cursor`（实测 `cursorValue` 无效，等于不传）。
+   * 带 cursor 的页里不再包含焦点推文，只有后续回复，所以此时 tweet 返回 null。
+   */
+  async getTweetDetail(
+    tweetId: string,
+    limit = 20,
+    cursor?: string,
+  ): Promise<{ tweet: Tweet | null; replies: Tweet[]; nextCursor?: string }> {
     const data = await this.client.graphql<{
       threaded_conversation_with_injections_v2?: { instructions?: unknown };
     }>('TweetDetail', {
       focalTweetId: tweetId,
+      ...(cursor ? { cursor } : {}),
       with_rux_injections: false,
       includePromotedContent: true,
       withCommunity: true,
@@ -114,9 +124,10 @@ export class XApi {
     if (!instructions) throw new XError('upstream', 'TweetDetail returned no conversation.');
     const page = parseTimelineInstructions(instructions);
 
-    const tweet = page.tweets.find((t) => t.id === tweetId) ?? page.tweets[0] ?? null;
+    // 带 cursor 的后续页不含焦点推文，别把第一条回复误当成它
+    const tweet = cursor ? null : (page.tweets.find((t) => t.id === tweetId) ?? page.tweets[0] ?? null);
     const replies = page.tweets.filter((t) => t.id !== tweet?.id).slice(0, limit);
-    return { tweet, replies };
+    return { tweet, replies, nextCursor: page.nextCursor };
   }
 
   /** 趋势。woeid=1 为全球，中国为 23424781。 */

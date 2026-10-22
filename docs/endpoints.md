@@ -102,6 +102,27 @@ Two traps:
 
 Note the doubled `timeline`. Both are handled.
 
+## Finding 5: paging a conversation needs `cursor`, not `cursorValue`
+
+`TweetDetail` returns its replies as `conversationthread-*` entries plus one
+`cursor-bottom-<id>` whose `content.value` is the next-page token:
+
+```
+GET TweetDetail?variables={"focalTweetId":…,"cursor":"<token>"}
+```
+
+Passing the token as **`cursor`** returns the next page (36 replies, zero overlap with page 1
+in testing). Passing it as `cursorValue` is silently ignored and you get page 1 again — no
+error, just duplicate data, which is the kind of bug that reads as "there are no more
+replies".
+
+Two more details:
+
+- A paged response does **not** contain the focal post, only further replies. A parser that
+  assumes "first tweet in the timeline is the focal post" will mislabel a reply.
+- Each page's size is decided by X. `limit` only truncates locally, so asking for 40 does not
+  make X return more than it wanted to.
+
 ## Maintenance map
 
 | Symptom | First thing to check |

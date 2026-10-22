@@ -14,7 +14,7 @@ Credentials are the account owner's own browser session (`auth_token` + `ct0`).
 | `x_user_tweets` | a user's recent posts, retweets nested |
 | `x_home_timeline` | the authenticated account's "For you" feed |
 | `x_search` | post search with X operators (`from:`, `lang:`, `min_faves:`, …), Latest/Top/Media |
-| `x_tweet_detail` | one post plus its reply conversation |
+| `x_tweet_detail` | one post plus its reply conversation; supports paging via `nextCursor` → `cursor` |
 | `x_trends` | trending topics by `woeid` (1 = worldwide, 23424781 = mainland China) |
 
 Every tool is read-only. Writes (post, like, bookmark) are deliberately absent: clients like

@@ -227,15 +227,19 @@ export function createServer(api: XApi): McpServer {
     {
       title: 'Post detail and replies',
       description:
-        'Fetch a single post plus the replies/conversation shown under it. Pass the numeric post id (the trailing number of a status URL).',
+        'Fetch a single post plus the replies/conversation shown under it. Pass the numeric post id (the trailing number of a status URL). The response carries nextCursor when more replies exist — pass it back as cursor to read the next page; paged responses have tweet=null and contain only replies.',
       inputSchema: {
         id: z.string().describe('Numeric post id'),
-        limit: z.number().int().min(1).max(40).default(20).describe('How many replies to return (1-40)'),
+        limit: z.number().int().min(1).max(40).default(20).describe('How many replies to return per page (1-40)'),
+        cursor: z
+          .string()
+          .optional()
+          .describe('nextCursor from a previous call, to read further replies'),
       },
     },
-    async ({ id, limit }) => {
+    async ({ id, limit, cursor }) => {
       try {
-        return json(await api.getTweetDetail(id, limit));
+        return json(await api.getTweetDetail(id, limit, cursor));
       } catch (error) {
         return failure(error);
       }
