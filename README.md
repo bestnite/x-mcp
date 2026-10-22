@@ -27,16 +27,22 @@ All tools are read-only. Posting, liking, bookmarking and direct messages are ou
 
 ## Installation
 
-### From the registry
+### From npm
+
+```bash
+npx -y @nite07/x-mcp
+```
+
+### From the private registry
+
+The same package is mirrored to a self-hosted Gitea registry. Both flags are required: the
+package comes from Gitea, its dependencies from npmjs.
 
 ```bash
 npx -y --registry=https://registry.npmjs.org/ \
-  --@nite:registry=https://git.nite07.com/api/packages/nite/npm/ \
-  @nite/x-mcp
+  --@nite07:registry=https://git.nite07.com/api/packages/nite/npm/ \
+  @nite07/x-mcp
 ```
-
-The package is served from a private registry and its dependencies from npmjs, so both flags
-are required.
 
 ### From source
 
@@ -89,12 +95,7 @@ Most MCP clients accept a JSON server definition:
   "mcpServers": {
     "x": {
       "command": "npx",
-      "args": [
-        "-y",
-        "--registry=https://registry.npmjs.org/",
-        "--@nite:registry=https://git.nite07.com/api/packages/nite/npm/",
-        "@nite/x-mcp@latest"
-      ],
+      "args": ["-y", "@nite07/x-mcp@latest"],
       "env": {
         "X_AUTH_TOKEN": "<auth_token>",
         "X_CSRF_TOKEN": "<ct0>"

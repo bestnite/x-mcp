@@ -26,15 +26,21 @@
 
 ## 安装
 
-### 从 registry 运行
+### 从 npm 运行
+
+```bash
+npx -y @nite07/x-mcp
+```
+
+### 从私有 registry 运行
+
+同一个包也镜像在自建的 Gitea registry 上。两个参数都需要：包本体来自 Gitea，依赖来自 npmjs。
 
 ```bash
 npx -y --registry=https://registry.npmjs.org/ \
-  --@nite:registry=https://git.nite07.com/api/packages/nite/npm/ \
-  @nite/x-mcp
+  --@nite07:registry=https://git.nite07.com/api/packages/nite/npm/ \
+  @nite07/x-mcp
 ```
-
-包本体放在私有 registry，依赖仍走 npmjs，所以两个参数都需要。
 
 ### 从源码运行
 
@@ -85,12 +91,7 @@ lang=zh-cn
   "mcpServers": {
     "x": {
       "command": "npx",
-      "args": [
-        "-y",
-        "--registry=https://registry.npmjs.org/",
-        "--@nite:registry=https://git.nite07.com/api/packages/nite/npm/",
-        "@nite/x-mcp@latest"
-      ],
+      "args": ["-y", "@nite07/x-mcp@latest"],
       "env": {
         "X_AUTH_TOKEN": "<auth_token>",
         "X_CSRF_TOKEN": "<ct0>"
