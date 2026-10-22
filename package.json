@@ -1,6 +1,6 @@
 {
   "name": "@nite/x-mcp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "description": "Read-only MCP server for X (Twitter) via its internal GraphQL API",
   "license": "MIT",
@@ -10,6 +10,7 @@
   "files": [
     "dist",
     "README.md",
+    "README.zh.md",
     "docs"
   ],
   "engines": {

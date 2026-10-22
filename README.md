@@ -1,92 +1,33 @@
+English | [简体中文](README.zh.md)
+
 # x-mcp
 
-A read-only MCP server for X (formerly Twitter), built on X's **internal GraphQL API** —
-the one the web app itself calls. No paid developer API, no HTML scraping, no Nitter.
-
-Credentials are the account owner's own browser session (`auth_token` + `ct0`).
+A read-only MCP server for X (Twitter). It exposes profiles, posts, search, trends and
+conversations as MCP tools, using the same API the X web app calls — no developer account,
+no API key, no HTML scraping.
 
 ## Tools
 
-| Tool | What it returns |
+| Tool | Description |
 |---|---|
-| `x_auth_status` | whether the stored session still works; says who has to fix it when it does not |
-| `x_user_lookup` | profile by handle: bio, follower/following/post counts, verification, join date, avatar & banner |
-| `x_user_tweets` | a user's recent posts, retweets nested |
-| `x_home_timeline` | the authenticated account's "For you" feed |
-| `x_search` | post search with X operators (`from:`, `lang:`, `min_faves:`, …), Latest/Top/Media |
-| `x_tweet_detail` | one post plus its reply conversation; supports paging via `nextCursor` → `cursor` |
-| `x_trends` | trending topics by `woeid` (1 = worldwide, 23424781 = mainland China) |
+| `x_auth_status` | Check whether the configured session still works |
+| `x_user_lookup` | Profile by handle: bio, follower and post counts, verification, join date, avatar, banner |
+| `x_user_tweets` | A user's recent posts, newest first; retweets include the original post |
+| `x_home_timeline` | The authenticated account's "For you" feed |
+| `x_search` | Search posts, with X operators such as `from:`, `lang:`, `min_faves:` and `#tag` |
+| `x_tweet_detail` | A post with its reply conversation; supports paging |
+| `x_trends` | Trending topics by location |
 
-Every tool is read-only. Writes (post, like, bookmark) are deliberately absent: clients like
-QuaX and Squawker keep those local-only, so there is no verified reference implementation to
-follow.
+All tools are read-only. Posting, liking, bookmarking and direct messages are out of scope.
 
-## Error semantics
+## Requirements
 
-The caller is an agent, so every failure answers three questions: what happened, who can
-fix it, and whether retrying helps.
+- Node.js 20 or later
+- An X account with a browser session
 
-```
-[err.auth_expired] x.com redirected /home to /i/jf/onboarding/web?… — the session cookies are no longer valid.
+## Installation
 
-Meaning: The stored X session cookie is no longer accepted. X does not refresh auth_token
-         in responses, so this cannot self-heal.
-Action:  Ask the user to: log in to x.com in a browser, open DevTools → Application →
-         Cookies → x.com, copy auth_token and ct0, replace both values in the server's .env,
-         then restart the server.
-Retryable: no — do not call this tool again until the action above is done
-```
-
-| Code | Who can fix it |
-|---|---|
-| `auth_missing`, `auth_expired`, `auth_csrf` | the user — refresh cookies, restart the server |
-| `auth_restricted` | the user — unlock or appeal on x.com; new cookies will not help |
-| `rate_limited` | nobody — wait for the reset time in the message |
-| `query_stale`, `signer_broken` | a maintainer — X changed its frontend (see the docs) |
-| `not_found` | nobody — the handle or post id is wrong |
-| `upstream` | retry once, then report |
-
-None of these are guesses about intent: `auth_*` means a retry is guaranteed to fail,
-`upstream` means it might succeed.
-
-**A trap worth knowing:** X answers an invalid cookie with a **307 to a login page**, not a
-401. Following that redirect yields a `200` login page, which looks exactly like "the page
-layout changed". So the server checks status codes before parsing, and when preparation
-(queryId extraction or signer build) fails, it probes the session first and attributes the
-failure to auth if that is the real cause.
-
-`x_auth_status` is the cheap way to ask the same question on purpose: it requests
-`x.com/home` with the stored cookies and reports the redirect, without building the signer.
-
-## Status
-
-| Part | State |
-|---|---|
-| `src/tid/` — `x-client-transaction-id` signer | ✅ byte-for-byte verified against recorded fixtures |
-| `src/x/` — GraphQL + legacy REST client, queryId auto-discovery | ✅ all six read endpoints verified live (2026-10-23) |
-| `src/mcp/` — MCP tools over streamable HTTP | ✅ seven tools, end-to-end smoke test passes |
-| Tests | ✅ 30 unit tests, no network required |
-
-## Quick start
-
-```bash
-npm install
-cp .env.example .env        # then fill in auth_token / ct0
-npm run build
-npm start                   # HTTP entrypoint, listens on 127.0.0.1:8787/mcp
-```
-
-```bash
-npm test                    # unit tests (offline)
-node scripts/mcp-smoke.mjs  # end-to-end, needs a running server + valid cookie
-```
-
-Health check: `curl http://127.0.0.1:8787/health` → `{ status, operations, tools }`.
-
-### Install from a registry
-
-The package is published to the self-hosted Gitea registry as `@nite/x-mcp`. Only the
-scoped package goes through Gitea; its dependencies still resolve from npmjs:
+### From the registry
 
 ```bash
 npx -y --registry=https://registry.npmjs.org/ \
@@ -94,88 +35,154 @@ npx -y --registry=https://registry.npmjs.org/ \
   @nite/x-mcp
 ```
 
-That command is what an MCP host runs — it starts the stdio entrypoint (`dist/stdio.js`).
-Everything logged goes to stderr, so the JSON-RPC stream stays clean.
+The package is served from a private registry and its dependencies from npmjs, so both flags
+are required.
 
-Credentials come from the environment in that mode:
+### From source
+
+```bash
+git clone https://git.nite07.com/nite/x-mcp.git
+cd x-mcp
+npm install
+npm run build
+node dist/stdio.js
+```
+
+## Configuration
+
+The server authenticates with your existing X browser session. Two cookies are needed:
+`auth_token` and `ct0`.
+
+1. Sign in to <https://x.com> in a browser.
+2. Open DevTools → Application → Cookies → `x.com`.
+3. Copy the values of `auth_token` and `ct0`.
+
+Provide them in whichever form matches how the server is started.
+
+**Environment variables**, when a client launches the process:
 
 ```
-X_AUTH_TOKEN=...
-X_CSRF_TOKEN=...
+X_AUTH_TOKEN=<auth_token>
+X_CSRF_TOKEN=<ct0>
 X_LANG=zh-cn
 ```
 
-### Configuration
+`X_LANG` is optional and affects the language of X's responses.
 
-`.env` (mode 600, gitignored):
+**`.env` file**, when running from source in the project directory:
 
 ```
-auth_token=...
-ct0=...
-twid=u%3D...
+auth_token=<auth_token>
+ct0=<ct0>
 lang=zh-cn
-X_MCP_HOST=127.0.0.1
-X_MCP_PORT=8787
 ```
 
-Extract the cookies from a logged-in browser: devtools → Application → Cookies → `x.com`.
-Password login through the API is closed (`code 366`) and guest mode is closed; the cookie is
-the only path. It is a full login state — treat it as a password.
+These values are a complete login state. Treat them as a password: keep the file at mode
+`600` and never commit it.
 
-### MCP endpoint
+## Client setup
 
-Streamable HTTP, **stateless**, JSON responses: `POST http://127.0.0.1:8787/mcp`.
-Drop it behind a gateway if several clients should share one server.
+Most MCP clients accept a JSON server definition:
 
-## How it survives X changing things
-
-Three things expire on X's schedule, and each has its own recovery path:
-
-| Dependency | Lifetime | Failure | Handling |
-|---|---|---|---|
-| cookie | until revoked | 401 / 403 | surfaced as an auth error, no retry |
-| `queryId` + feature flags | ~22 days | 404 / 422 | re-extracted from `main.js`, retried once |
-| transaction-id signer | when the frontend changes | 404 | signer rebuilt from a fresh x.com fetch, retried once |
-
-queryIds are **never hardcoded**. `main.js` currently exposes ~104 operations as
-`{queryId, operationName, featureSwitches, fieldToggles}`; the registry parses all of them at
-startup (or on demand) and caches them for 6 hours.
-
-Two of the six endpoints are not GraphQL at all — X no longer serves a `HomeTimeline`
-operation, and trends still live on v1.1. See
-**[docs/endpoints.md](docs/endpoints.md)** for what was found, how, and the 2026 shape changes.
-
-## Layout
-
-```
-src/
-  tid/        transaction-id signer (see docs/reverse-engineering.md)
-  x/          client.ts, operations.ts, parse.ts, api.ts, auth.ts
-  mcp/        tool definitions
-  config.ts   .env loading
-  index.ts    HTTP entrypoint
-docs/
-  reverse-engineering.md   how the signing header was reverse-engineered + traps
-  endpoints.md             which operation serves what, and the 2026 shape changes
-test/         30 unit tests (fixtures for the signer, synthetic payloads for parsers)
-scripts/      mcp-smoke.mjs — end-to-end check against a running server
+```json
+{
+  "mcpServers": {
+    "x": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "--registry=https://registry.npmjs.org/",
+        "--@nite:registry=https://git.nite07.com/api/packages/nite/npm/",
+        "@nite/x-mcp@latest"
+      ],
+      "env": {
+        "X_AUTH_TOKEN": "<auth_token>",
+        "X_CSRF_TOKEN": "<ct0>"
+      }
+    }
+  }
+}
 ```
 
-### Fixtures
+The server communicates over stdio. It can also run as a standalone HTTP endpoint if your
+client prefers that transport:
 
-`test/fixtures/XClientTransactionId/` needs the recorded snapshot (`home.html`, `*.js`)
-next to `expected.json`. Those files are X Corp.'s code and are gitignored; `expected.json`
-and `sources.json` are tracked. Without the assets the fixture suite skips itself.
-Recording steps are in the reverse-engineering doc, §6.
+```bash
+npm start
+# POST http://127.0.0.1:8787/mcp
+```
 
-## Attribution
+## Usage
 
-The signer is a reimplementation from observed behaviour, following prior MIT-licensed
-ports: [iSarabjitDhiman/XClientTransaction](https://github.com/iSarabjitDhiman/XClientTransaction)
-(Python) → [Teskann/QuaX](https://github.com/Teskann/QuaX) (Dart) → this project.
+Check the session before relying on the data tools:
 
-Not affiliated with X Corp. For personal, read-only use; respect X's terms and rate limits.
+```
+x_auth_status  {}
+```
+
+Look up a profile, then its recent posts:
+
+```
+x_user_lookup   {"username": "X"}
+x_user_tweets   {"username": "X", "limit": 20}
+```
+
+Search with X operators:
+
+```
+x_search  {"query": "from:X lang:en", "product": "Latest", "limit": 20}
+```
+
+Read a conversation, one page at a time:
+
+```
+x_tweet_detail  {"id": "2106019976381689871", "limit": 40}
+                → { "tweet": {...}, "replies": [...], "nextCursor": "DAAKCgABHVQ…" }
+
+x_tweet_detail  {"id": "2106019976381689871", "limit": 40, "cursor": "DAAKCgABHVQ…"}
+                → { "tweet": null, "replies": [...], "nextCursor": "..." }
+```
+
+Paged responses contain only replies; `tweet` is `null` on those pages. Continue while
+`nextCursor` is present. Each page's size is decided by X, so `limit` caps how many items are
+returned rather than requesting more from the server.
+
+## Troubleshooting
+
+| Symptom | Action |
+|---|---|
+| `[err.auth_expired]` or `[err.auth_csrf]` | The session cookies are no longer valid. Copy both `auth_token` and `ct0` again from a signed-in browser, update them, and restart the client. |
+| `[err.auth_restricted]` | The account is locked, suspended, or not permitted to read the target. Resolve it on x.com; new cookies will not help. |
+| `[err.rate_limited]` | Wait until the time given in the message. |
+| `[err.query_stale]` or `[err.signer_broken]` | X changed its frontend and the server needs an update. See the developer documentation below. |
+| `[err.not_found]` | The handle or post id does not exist, or is not visible to this account. |
+| `[err.upstream]` | Transient. Retry once. |
+
+Every error states whether retrying can help, so a client driving these tools can decide
+without guessing.
+
+## Limitations
+
+- **Read-only.** No posting, liking, bookmarking or direct messages.
+- **Unofficial API.** X can change it at any time. The server refreshes request identifiers
+  and rebuilds its request signer automatically, but a breaking change on X's side may still
+  require an update.
+- **Rate limits follow your account.** Heavy automated use may be throttled or flagged by X.
+- **Personal use.** Use your own account and stay within X's terms of service.
+
+## Developer documentation
+
+- [docs/endpoints.md](docs/endpoints.md) — which endpoint serves what, and how X's response
+  shapes differ between versions
+- [docs/reverse-engineering.md](docs/reverse-engineering.md) — how the request signing header
+  was derived, the maintenance playbook, and the traps
 
 ## License
 
-MIT (to be finalized before publishing).
+MIT
+
+## Disclaimer
+
+Not affiliated with, endorsed by, or sponsored by X Corp. X and Twitter are trademarks of
+X Corp. This software is provided as is, for personal use, and you are responsible for
+complying with X's terms of service.
