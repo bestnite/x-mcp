@@ -1,0 +1,13 @@
+node_modules/
+dist/
+*.log
+
+# 登录凭证：只在本机，永不提交
+.env
+.cookie.env
+*.cookie
+
+# tid 回归测试用的录制素材：x.com 的产物，不进 git。
+# expected.json（我们算出的 tid）会提交。
+test/fixtures/XClientTransactionId/*.js
+test/fixtures/XClientTransactionId/*.html
