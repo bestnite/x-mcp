@@ -1,5 +1,5 @@
 {
-  "name": "x-mcp",
+  "name": "@nite/x-mcp",
   "version": "0.1.0",
   "type": "module",
   "description": "Read-only MCP server for X (Twitter) via its internal GraphQL API",

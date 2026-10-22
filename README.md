@@ -73,7 +73,7 @@ failure to auth if that is the real cause.
 npm install
 cp .env.example .env        # then fill in auth_token / ct0
 npm run build
-npm start                   # listens on 127.0.0.1:8787/mcp
+npm start                   # HTTP entrypoint, listens on 127.0.0.1:8787/mcp
 ```
 
 ```bash
@@ -82,6 +82,28 @@ node scripts/mcp-smoke.mjs  # end-to-end, needs a running server + valid cookie
 ```
 
 Health check: `curl http://127.0.0.1:8787/health` → `{ status, operations, tools }`.
+
+### Install from a registry
+
+The package is published to the self-hosted Gitea registry as `@nite/x-mcp`. Only the
+scoped package goes through Gitea; its dependencies still resolve from npmjs:
+
+```bash
+npx -y --registry=https://registry.npmjs.org/ \
+  --@nite:registry=https://git.nite07.com/api/packages/nite/npm/ \
+  @nite/x-mcp
+```
+
+That command is what an MCP host runs — it starts the stdio entrypoint (`dist/stdio.js`).
+Everything logged goes to stderr, so the JSON-RPC stream stays clean.
+
+Credentials come from the environment in that mode:
+
+```
+X_AUTH_TOKEN=...
+X_CSRF_TOKEN=...
+X_LANG=zh-cn
+```
 
 ### Configuration
 
