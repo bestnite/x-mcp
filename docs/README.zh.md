@@ -1,4 +1,4 @@
-[English](README.md) | 简体中文
+[English](../README.md) | 简体中文
 
 # x-mcp
 
@@ -165,8 +165,8 @@ X 决定，`limit` 限制的是本页返回多少条，而不是向服务端多�
 
 ## 开发文档
 
-- [docs/endpoints.md](docs/endpoints.md)——各能力对应哪个接口，以及 X 各版本响应结构的差异
-- [docs/reverse-engineering.md](docs/reverse-engineering.md)——请求签名头的逆向过程、维护手册与踩坑记录
+- [endpoints.md](endpoints.md)——各能力对应哪个接口，以及 X 各版本响应结构的差异
+- [reverse-engineering.md](reverse-engineering.md)——请求签名头的逆向过程、维护手册与踩坑记录
 
 ## 许可
 
