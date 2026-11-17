@@ -1,13 +1,17 @@
 /**
  * 把 X 的嵌套响应拍平成稳定的领域模型。
  *
- * X 的返回结构有三层麻烦：
- * 1. 同一条推文可能被包在 TweetWithVisibilityResults 里；
- * 2. 长推文的正文在 note_tweet 而非 legacy.full_text；
- * 3. 首页时间线走的是老的 v2 REST（globalObjects + timeline.instructions），
- *    与 GraphQL 的时间线结构完全不同。
+ * 2026-11 的 x-web 构建把字段搬了家，这里同时认新旧两套：
+ * - 正文：`note_tweet` → `details.full_text` → `legacy.full_text` → `text`
+ * - 时间：`details.created_at_ms` → `details.created_at` → `legacy.created_at`
+ * - 计数：`counts.*` → `legacy.*`（legacy 现在基本是空壳）
+ * - 媒体：`media_entities2` → `legacy.extended_entities.media`
+ * - 作者：`core.user_results.result`（未变）
+ * - 回复：`reply_to_results` / `reply_to_user_results`（不再是 legacy 的 in_reply_to_*）
  *
- * 这里统一吸收掉，输出结构不随端点和版本变化。
+ * 时间线入口也换了形状：`entry_id`（蛇形）+ `content.content` 两层包装，
+ * 游标在 `content.cursor_type/value`。所以取推文一律用有界结构搜索，
+ * 不写死路径——X 把 Tweet 从一层包装挪到另一层是常态。
  */
 
 export interface AuthorSummary {
@@ -86,6 +90,12 @@ type Any = any;
 const TWEET_URL = (username: string | undefined, id: string): string =>
   username ? `https://x.com/${username}/status/${id}` : `https://x.com/i/status/${id}`;
 
+const asNumber = (value: unknown): number | undefined => {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) return Number(value);
+  return undefined;
+};
+
 /** X 的 "Wed Oct 10 20:19:24 +0000 2018" → ISO 8601。 */
 export function toIsoDate(raw: unknown): string | undefined {
   if (typeof raw !== 'string' || !raw) return undefined;
@@ -93,10 +103,18 @@ export function toIsoDate(raw: unknown): string | undefined {
   return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString();
 }
 
+/** 毫秒时间戳 → ISO 8601。 */
+function toIsoFromMillis(raw: unknown): string | undefined {
+  const millis = asNumber(raw);
+  if (millis === undefined) return undefined;
+  const parsed = new Date(millis);
+  return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString();
+}
+
 /**
- * 用户对象。X 在 2026 年重构过：统计字段从 legacy 搬到了
- * relationship_counts / tweet_counts / profile_bio / verification / avatar 等顶层对象，
- * 这里两套都读，老的兼容新端点，新的兼容当前端点。
+ * 用户对象。X 把统计字段从 legacy 搬到了 relationship_counts / tweet_counts /
+ * profile_bio / verification / avatar 等顶层对象；legacy 里现在只剩几个开关。
+ * 两套都读：新的给当前端点，老的给还没迁移的端点。
  */
 export function parseUserResult(result: Any): User | null {
   const user = result?.__typename === 'UserWithVisibilityResults' ? result.user : result;
@@ -119,32 +137,29 @@ export function parseUserResult(result: Any): User | null {
     Boolean(verifiedType && verifiedType !== 'None');
 
   const avatar = (user.avatar?.image_url ?? legacy.profile_image_url_https) as string | undefined;
+  const site =
+    bio.entities?.description?.urls?.[0]?.expanded_url ??
+    bio.entities?.url?.urls?.[0]?.expanded_url ??
+    legacy.entities?.url?.urls?.[0]?.expanded_url ??
+    undefined;
 
   return {
     id: user.rest_id,
     username,
     name: core.name ?? legacy.name ?? username,
     bio: (bio.description ?? legacy.description) || undefined,
-    location: (user.location?.location ?? legacy.location) || undefined,
-    website:
-      bio.entities?.url?.urls?.[0]?.expanded_url ??
-      legacy.entities?.url?.urls?.[0]?.expanded_url ??
-      undefined,
-    createdAt: toIsoDate(core.created_at ?? legacy.created_at),
+    location: user.location?.location || legacy.location || undefined,
+    website: site,
+    createdAt: toIsoFromMillis(core.created_at_ms) ?? toIsoDate(core.created_at ?? legacy.created_at),
     verified,
-    blueVerified: Boolean(user.is_blue_verified),
-    followers: Number(relationship.followers ?? legacy.followers_count ?? 0),
-    following: Number(relationship.following ?? legacy.friends_count ?? 0),
-    tweets: Number(counts.tweets ?? legacy.statuses_count ?? 0),
-    likes:
-      user.action_counts?.favorites_count != null
-        ? Number(user.action_counts.favorites_count)
-        : legacy.favourites_count != null
-          ? Number(legacy.favourites_count)
-          : undefined,
+    blueVerified: Boolean(verification.is_blue_verified ?? user.is_blue_verified),
+    followers: asNumber(relationship.followers ?? legacy.followers_count) ?? 0,
+    following: asNumber(relationship.following ?? legacy.friends_count) ?? 0,
+    tweets: asNumber(counts.tweets ?? legacy.statuses_count) ?? 0,
+    likes: asNumber(user.action_counts?.favorites_count ?? legacy.favourites_count),
     // _normal 是 48px 缩略图，_400x400 更适合展示
     avatarUrl: avatar ? avatar.replace('_normal.', '_400x400.') : undefined,
-    bannerUrl: user.banner?.image_url ?? legacy.profile_banner_url ?? undefined,
+    bannerUrl: (user.banner?.image_url ?? legacy.profile_banner_url) || undefined,
   };
 }
 
@@ -168,9 +183,9 @@ function bestVideoUrl(videoInfo: Any): string | undefined {
   return mp4[0]?.url;
 }
 
-function parseMedia(legacy: Any): MediaItem[] {
-  const media: Any[] = legacy?.extended_entities?.media ?? legacy?.entities?.media ?? [];
-  return media.map((item) => {
+/** media_entities2（x-web）与 legacy 的 media 数组结构一致，一套解析。 */
+function parseMediaItems(items: Any[]): MediaItem[] {
+  return items.map((item) => {
     const type = item?.type === 'photo' || item?.type === 'video' || item?.type === 'animated_gif'
       ? item.type === 'animated_gif'
         ? 'gif'
@@ -187,48 +202,114 @@ function parseMedia(legacy: Any): MediaItem[] {
   });
 }
 
+function parseMedia(tweet: Any): MediaItem[] {
+  const legacy = tweet?.legacy ?? {};
+  const items: Any[] =
+    tweet?.media_entities2 ?? legacy?.extended_entities?.media ?? legacy?.entities?.media ?? [];
+  return parseMediaItems(items);
+}
+
+/** 同一条推文可能被包在 TweetWithVisibilityResults / TweetUnavailable 里。 */
+function unwrapTweet(input: Any): Any {
+  if (!input || typeof input !== 'object') return undefined;
+  if (input.__typename === 'TweetWithVisibilityResults') return input.tweet;
+  return input;
+}
+
 export function parseTweetResult(input: Any): Tweet | null {
-  if (!input) return null;
-  // 可见性包装
-  const result = input.__typename === 'TweetWithVisibilityResults' ? input.tweet : input;
+  const result = unwrapTweet(input);
   if (!result || typeof result.rest_id !== 'string') return null;
 
   const legacy = result.legacy ?? {};
-  // 长推文正文优先
+  const details = result.details ?? {};
+  const counts = result.counts ?? {};
+
+  // 长推文正文优先；x-web 把普通正文放到 details.full_text，legacy 里已经是空的
   const noteText: string | undefined = result.note_tweet?.note_tweet_results?.result?.text;
-  const text: string = noteText ?? legacy.full_text ?? '';
+  const text: string = noteText ?? details.full_text ?? legacy.full_text ?? result.text ?? '';
 
   const author = parseAuthor(result);
   const retweeted = parseTweetResult(
-    result.retweeted_status_result?.result ?? legacy.retweeted_status_result?.result,
+    result.retweeted_post_results?.result ??
+      result.retweeted_status_result?.result ??
+      legacy.retweeted_status_result?.result,
   );
   const quoted = parseTweetResult(
-    result.quoted_status_result?.result ?? legacy.quoted_status_result?.result,
+    result.quoted_tweet_results?.result ??
+      result.quoted_status_result?.result ??
+      legacy.quoted_status_result?.result,
   );
+
+  const replyToId: string | undefined =
+    result.reply_to_results?.rest_id ?? legacy.in_reply_to_status_id_str ?? undefined;
+  const replyToUsername: string | undefined =
+    result.reply_to_user_results?.result?.core?.screen_name ?? legacy.in_reply_to_screen_name ?? undefined;
 
   return {
     id: result.rest_id,
     url: TWEET_URL(author?.username, result.rest_id),
     text,
-    createdAt: toIsoDate(legacy.created_at),
-    lang: legacy.lang,
+    createdAt:
+      toIsoFromMillis(details.created_at_ms) ?? toIsoDate(details.created_at ?? legacy.created_at),
+    lang: legacy.lang ?? details.lang ?? undefined,
     author,
     metrics: {
-      likes: Number(legacy.favorite_count ?? 0),
-      retweets: Number(legacy.retweet_count ?? 0),
-      replies: Number(legacy.reply_count ?? 0),
-      quotes: Number(legacy.quote_count ?? 0),
-      views: result.views?.count != null ? Number(result.views.count) : undefined,
+      likes: asNumber(counts.favorite_count ?? legacy.favorite_count) ?? 0,
+      retweets: asNumber(counts.retweet_count ?? legacy.retweet_count) ?? 0,
+      replies: asNumber(counts.reply_count ?? legacy.reply_count) ?? 0,
+      quotes: asNumber(counts.quote_count ?? legacy.quote_count) ?? 0,
+      views: asNumber(result.views?.count),
     },
-    media: parseMedia(legacy),
+    media: parseMedia(result),
     isRetweet: Boolean(retweeted),
-    isReply: Boolean(legacy.in_reply_to_status_id_str),
-    inReplyToTweetId: legacy.in_reply_to_status_id_str ?? undefined,
-    inReplyToUsername: legacy.in_reply_to_screen_name ?? undefined,
+    isReply: Boolean(replyToId),
+    inReplyToTweetId: replyToId,
+    inReplyToUsername: replyToUsername,
     quotedTweet: quoted ?? undefined,
     retweetedTweet: retweeted ?? undefined,
   };
 }
+
+/**
+ * 在一个 entry 里找推文。X 把 Tweet 放在 `content.content`、模块的
+ * `content.items[].item.content`，或者更深的包装里，所以用有界结构搜索而不是固定路径。
+ */
+function findTweetResult(entry: Any): Any | undefined {
+  const queue: unknown[] = [entry];
+  let visited = 0;
+  while (queue.length > 0 && visited < 64) {
+    const current = queue.shift();
+    visited += 1;
+    if (!current || typeof current !== 'object') continue;
+    const value = current as Any;
+    const candidate = value.tweet_results?.result;
+    if (candidate && typeof candidate === 'object') return candidate;
+    for (const child of Object.values(value)) {
+      if (child && typeof child === 'object') queue.push(child);
+    }
+  }
+  return undefined;
+}
+
+/** 游标记录：`content.cursor_type/value`（可以是 entry.content 或 entry.content.content）。 */
+function readCursor(entry: Any): { type: string; value: string } | undefined {
+  const candidates = [entry?.content, entry?.content?.content];
+  for (const content of candidates) {
+    const type = content?.cursor_type;
+    const value = content?.value;
+    if (typeof value === 'string' && value) {
+      return { type: typeof type === 'string' ? type : '', value };
+    }
+  }
+  const entryId: string = entry?.entry_id ?? entry?.entryId ?? '';
+  if (entryId.startsWith('cursor-') && typeof entry?.content?.value === 'string') {
+    return { type: entryId.slice('cursor-'.length), value: entry.content.value };
+  }
+  return undefined;
+}
+
+const isBottomCursor = (cursor: { type: string; value: string }): boolean =>
+  cursor.type === 'Bottom' || cursor.type === 'ShowMore' || cursor.type === 'showMore';
 
 /** 从 timeline instructions 里取推文与下一页游标。 */
 export function parseTimelineInstructions(instructions: Any): TweetPage {
@@ -236,32 +317,24 @@ export function parseTimelineInstructions(instructions: Any): TweetPage {
   let nextCursor: string | undefined;
 
   for (const instruction of instructions ?? []) {
-    for (const entry of instruction?.entries ?? []) {
-      const entryId: string = entry?.entryId ?? '';
+    // 老 v2 的 instructions 是 {addEntries:{entries}} / {pinEntry:{entry}}
+    const entries: Any[] = [
+      ...(instruction?.entries ?? []),
+      ...(instruction?.addEntries?.entries ?? []),
+      ...(instruction?.entry ? [instruction.entry] : []),
+      ...(instruction?.pinEntry?.entry ? [instruction.pinEntry.entry] : []),
+    ];
 
-      if (entryId.startsWith('cursor-bottom') || entryId.startsWith('cursor-showMore') ) {
-        const value = entry?.content?.value;
-        if (typeof value === 'string' && value) nextCursor = value;
+    for (const entry of entries) {
+      const cursor = readCursor(entry);
+      if (cursor) {
+        if (isBottomCursor(cursor)) nextCursor = cursor.value;
         continue;
       }
 
-      // 单条推文
-      const single =
-        entry?.content?.itemContent?.tweet_results?.result ??
-        entry?.content?.item?.itemContent?.tweet_results?.result;
-      if (single) {
-        const tweet = parseTweetResult(single);
-        if (tweet) tweets.push(tweet);
-        continue;
-      }
-
-      // 会话模块（含多条推文）
-      const items: Any[] = entry?.content?.items ?? [];
-      for (const item of items) {
-        const candidate = item?.item?.itemContent?.tweet_results?.result;
-        const tweet = parseTweetResult(candidate);
-        if (tweet) tweets.push(tweet);
-      }
+      const result = findTweetResult(entry);
+      const tweet = parseTweetResult(result);
+      if (tweet) tweets.push(tweet);
     }
   }
 
@@ -303,7 +376,7 @@ export function parseHomeTimeline(payload: Any): TweetPage {
 
   for (const instruction of payload?.timeline?.instructions ?? []) {
     for (const entry of entriesOf(instruction)) {
-      const entryId: string = entry?.entryId ?? '';
+      const entryId: string = entry?.entryId ?? entry?.entry_id ?? '';
       if (entryId.includes('cursor-bottom') || entryId.includes('cursor-showMore')) {
         const value = entry?.content?.value ?? entry?.content?.operation?.cursor?.value;
         if (typeof value === 'string' && value) nextCursor = value;

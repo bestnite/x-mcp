@@ -64,15 +64,9 @@ const HINTS: Record<
   },
   query_stale: {
     meaning:
-      "The queryId was refreshed and the request still failed. X most likely renamed or removed the operation the server depends on.",
+      'The page no longer embeds the GraphQL operation the server needs, or the queryId it just rediscovered was rejected twice. X most likely changed which operations a page ships, or renamed one.',
     action:
-      'This needs a maintainer: check docs/endpoints.md and docs/reverse-engineering.md. Retrying or changing arguments will not help.',
-    retryable: false,
-  },
-  signer_broken: {
-    meaning: 'The x-client-transaction-id signer could not be rebuilt from x.com — X probably changed its signing chain.',
-    action:
-      'This needs a maintainer: see docs/reverse-engineering.md §7 (maintenance playbook). Not an argument or credential problem.',
+      'This needs a maintainer: see the discovery section of docs/reverse-engineering.md. Retrying or changing arguments will not help.',
     retryable: false,
   },
   not_found: {
@@ -176,7 +170,7 @@ export function createServer(api: XApi): McpServer {
     {
       title: 'Recent posts from a user',
       description:
-        "List a user's recent posts, newest first. Retweets are included with the original post nested under retweetedTweet. Use x_user_lookup first if you need the profile.",
+        "List a user's own recent posts, newest first. This is X's profile 'originals' timeline, so reposts by the account are not part of it; quoted posts come nested under quotedTweet. Use x_user_lookup first if you need the profile.",
       inputSchema: {
         username: z.string().describe('Handle (with or without @) or numeric user id'),
         limit: z.number().int().min(1).max(40).default(20).describe('How many posts to return (1-40)'),

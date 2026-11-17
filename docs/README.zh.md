@@ -11,7 +11,7 @@
 |---|---|
 | `x_auth_status` | 检查当前配置的会话是否仍然有效 |
 | `x_user_lookup` | 按用户名取资料：简介、关注者数、推文数、认证状态、注册时间、头像与横幅 |
-| `x_user_tweets` | 用户最近的推文，按时间倒序；转推会嵌套原始推文 |
+| `x_user_tweets` | 用户本人的最近推文，按时间倒序（X 个人页的「原创」时间线；引用帖会嵌套原帖） |
 | `x_home_timeline` | 当前账号的「为你推荐」时间线 |
 | `x_search` | 搜索推文，支持 `from:`、`lang:`、`min_faves:`、`#tag` 等 X 搜索语法 |
 | `x_tweet_detail` | 单条推文及其评论区，支持翻页 |
@@ -149,7 +149,7 @@ X 决定，`limit` 限制的是本页返回多少条，而不是向服务端多�
 | `[err.auth_expired]` 或 `[err.auth_csrf]` | 会话 cookie 已失效。在已登录的浏览器中重新复制 `auth_token` 和 `ct0`，更新后重启客户端。 |
 | `[err.auth_restricted]` | 账号被锁定、封禁，或无权读取该目标。需要在 x.com 上处理，换 cookie 无效。 |
 | `[err.rate_limited]` | 等到消息中给出的时间再试。 |
-| `[err.query_stale]` 或 `[err.signer_broken]` | X 修改了前端，需要更新本服务器。参见下方的开发文档。 |
+| `[err.query_stale]` | 页面里不再带本服务器需要的 GraphQL operation，或重挖一次 queryId 后仍被拒绝。X 改了前端，需要更新本服务器。参见下方的开发文档。 |
 | `[err.not_found]` | 用户名或推文 ID 不存在，或当前账号不可见。 |
 | `[err.upstream]` | 临时故障，可重试一次。 |
 
@@ -158,15 +158,14 @@ X 决定，`limit` 限制的是本页返回多少条，而不是向服务端多�
 ## 限制
 
 - **只读。** 不支持发帖、点赞、收藏和私信。
-- **非官方接口。** X 随时可能改动。服务器会自动刷新请求标识并重建请求签名器，但若 X 侧发生
-  破坏性变更，仍可能需要更新版本。
+- **非官方接口。** X 随时可能改动。服务器会在运行时从 x.com 页面重新发现 operation 的 queryId 与变量，但若 X 侧直接下线某条 operation，仍需更新版本。
 - **速率限制跟随你的账号。** 高频自动化使用可能被 X 限流或标记。
 - **个人用途。** 请使用自己的账号，并遵守 X 的服务条款。
 
 ## 开发文档
 
 - [endpoints.md](endpoints.md)——各能力对应哪个接口，以及 X 各版本响应结构的差异
-- [reverse-engineering.md](reverse-engineering.md)——请求签名头的逆向过程、维护手册与踩坑记录
+- [reverse-engineering.md](reverse-engineering.md)——operation 的 queryId 与变量如何从页面里发现、错误分类、维护手册，以及已退役的请求签名方案
 
 ## 许可
 

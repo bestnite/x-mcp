@@ -1,16 +1,15 @@
 /**
- * X 内部 API 客户端：GraphQL（带签名）+ 少量仍存活的 REST 端点。
+ * X 内部 API 客户端：GraphQL（页面发现 queryId，不需要签名头）+ 少量仍存活的 REST 端点。
  *
- * 三个会过期的依赖，失效信号各不相同：
- * - cookie（auth_token/ct0）→ 401/403
+ * 只有三样东西会过期，失效信号各不相同：
+ * - cookie（auth_token/ct0）→ 401/403，或页面变成登录墙
  * - queryId → 404 / 422 GRAPHQL_VALIDATION_FAILED
- * - 签名链（key 或算法）→ 404，而且看起来和 queryId 过期一模一样
+ * - 变量模板（页面自带的 relay 开关）→ 422，与 queryId 过期长得一样
  *
- * 所以 404 不能直接判死：先刷新 operations 重试，再重建签名器重试，
- * 两次都不行才报错，报错信息里带上是哪一步失败的。
+ * 所以 404/422 不直接判死：重挖一次 operation 再试一次，两次都不行才报 query_stale。
+ * 报错信息里带上「哪一步、哪条 operation」，agent 才能把「换 cookie」和「找维护者」分开。
  */
 import type { Config } from '../config.js';
-import { ClientTransaction, ClientTransactionIdError, SourceFetchError } from '../tid/index.js';
 import {
   GRAPHQL_BASE,
   REST_BASE,
@@ -23,7 +22,7 @@ import {
   webHeaders,
   type XErrorCode,
 } from './auth.js';
-import { OperationsRegistry } from './operations.js';
+import { OperationsRegistry, type Operation, type PageSpec } from './operations.js';
 
 type Failure = {
   ok: false;
@@ -38,8 +37,6 @@ type Failure = {
 type Attempt<T> = { ok: true; data: T } | Failure;
 
 export class XClient {
-  private transaction: ClientTransaction | null = null;
-  private transactionLoading: Promise<ClientTransaction> | null = null;
   readonly operations: OperationsRegistry;
 
   constructor(
@@ -49,83 +46,18 @@ export class XClient {
     this.operations = new OperationsRegistry(config.cookies, config.operationsTtlMs, fetcher);
   }
 
-  /** 预热签名器与 operations 表；失败只记录，不阻塞启动。 */
-  async warmUp(): Promise<{ operations: number; transactionReady: boolean }> {
-    const [ops, tx] = await Promise.allSettled([
-      this.operations.refresh(true),
-      this.getTransaction(),
-    ]);
-    return {
-      operations: this.operations.size,
-      transactionReady: tx.status === 'fulfilled' && ops.status === 'fulfilled',
-    };
-  }
-
-  // --- 签名器 ---
-
-  private async getTransaction(): Promise<ClientTransaction> {
-    if (this.transaction) return this.transaction;
-    if (this.transactionLoading) return this.transactionLoading;
-
-    this.transactionLoading = (async () => {
-      try {
-        const tx = await ClientTransaction.initialize();
-        this.transaction = tx;
-        return tx;
-      } catch (error) {
-        if (error instanceof SourceFetchError) {
-          // cookie 失效时连签名器都建不起来：这在用户看来是「登录过期」，不是「代码坏了」
-          if (error.statusCode === 401 || error.statusCode === 403) {
-            throw new XAuthError(
-              'auth_expired',
-              `x.com rejected the session while building the signer (HTTP ${error.statusCode}) — the cookies are no longer valid.`,
-              error.statusCode,
-            );
-          }
-          throw new XError(
-            'signer_broken',
-            `Could not fetch x.com to build the signer: ${error.message}`,
-            error.statusCode,
-          );
-        }
-        if (error instanceof ClientTransactionIdError) {
-          throw new XError('signer_broken', `The transaction-id signer broke: ${error.message}`);
-        }
-        throw error;
-      }
-    })();
-
-    try {
-      return await this.transactionLoading;
-    } finally {
-      this.transactionLoading = null;
-    }
-  }
-
-  /**
-   * 准备阶段（取 queryId、建签名器）失败时，判断是不是 cookie 失效导致的。
-   * 是的话把「页面结构变了」改写成 auth_expired——这个区别决定 agent 让用户换 cookie 还是找维护者。
-   */
-  private async enrichAuthError(error: unknown): Promise<unknown> {
-    if (error instanceof XAuthError) return error;
-    if (!(error instanceof XError)) return error;
-    if (error.code === 'auth_expired' || error.code === 'auth_csrf') return error;
-
-    const probe = await this.probeSession().catch(() => null);
-    if (probe && !probe.ok && probe.code === 'auth_expired') {
-      return new XAuthError(
-        'auth_expired',
-        `${probe.message} The request could not even be prepared: ${error.message}`,
-        401,
-      );
-    }
-    return error;
+  /** 启动时的探活：只确认 cookie 还能用，operation 在第一次调用时按页发现。 */
+  async warmUp(): Promise<{ authenticated: boolean; message: string }> {
+    const probe = await this.probeSession();
+    return probe.ok
+      ? { authenticated: true, message: 'the stored session is valid' }
+      : { authenticated: false, message: probe.message };
   }
 
   // --- 会话探测 ---
 
   /**
-   * 只检查 cookie 是否还有效：请求 x.com/home（不需要签名器，不需要 tid）。
+   * 只检查 cookie 是否还有效：请求 x.com/home（不需要任何 operation）。
    *
    * 判断依据是状态码而不是内容：已登录时 /home 直接 200，
    * 未登录时 X 回 307 跳到 /i/jf/onboarding/... 登录页——跟随后再看内容会误判成"有效"。
@@ -168,32 +100,59 @@ export class XClient {
     }
   }
 
+  /**
+   * 数字用户 id → handle：`/i/user/<id>` 会 302 到 `/<handle>`。
+   * 用户时间线那条 operation 只接受 screenName，所以数字入参要先换一次。
+   */
+  async resolveUsername(userId: string): Promise<string> {
+    const url = `https://x.com/i/user/${userId}`;
+    let res: Response;
+    try {
+      res = await this.fetcher(url, { headers: webHeaders(this.config.cookies), redirect: 'follow' });
+    } catch (error) {
+      throw new XError(
+        'upstream',
+        `Could not resolve the user id ${userId} to a handle: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    if (res.status === 401 || res.status === 403) {
+      throw new XAuthError('auth_expired', `${url} returned HTTP ${res.status}: the session cookie is no longer accepted.`, res.status);
+    }
+    if (res.status === 404) {
+      throw new XError('not_found', `No X account has the id ${userId}.`, 404);
+    }
+    if (!res.ok) {
+      throw new XError('upstream', `${url} returned HTTP ${res.status}.`, res.status);
+    }
+
+    const match = /^\/([A-Za-z0-9_]{1,15})$/.exec(new URL(res.url || url).pathname);
+    if (!match?.[1]) {
+      throw new XError('not_found', `The id ${userId} did not resolve to a handle (landed on ${res.url || url}).`);
+    }
+    return match[1];
+  }
+
   // --- GraphQL ---
 
-  async graphql<T>(operationName: string, variables: Record<string, unknown>): Promise<T> {
-    const first = await this.attemptGraphql<T>(operationName, variables);
+  /**
+   * 调一条 GraphQL operation。
+   *
+   * `page` 是这条 operation 的发现来源（搜索页 / 个人页 / 状态页），
+   * `variables` 只放调用方关心的键，页面自带的 relay 开关原样保留。
+   */
+  async graphql<T>(operationName: string, page: PageSpec, variables: Record<string, unknown>): Promise<T> {
+    const first = await this.attemptGraphql<T>(operationName, page, variables);
     if (first.ok) return first.data;
-    // 认证、限流、其它错误直接抛；只有 stale（404/422）才值得换 queryId/签名器重试
+    // 认证、限流、其它错误直接抛；只有 stale（404/422）才值得重挖重试一次
     if (first.kind !== 'stale') throw this.toError(first, operationName);
 
-    // 走到这里说明是 stale（404/422）：先刷新 queryId 表
-    try {
-      await this.operations.refresh(true);
-      const retried = await this.attemptGraphql<T>(operationName, variables);
-      if (!retried.ok) throw this.toError(retried, operationName);
-      return retried.data;
-    } catch (error) {
-      if (error instanceof XAuthError || error instanceof XRateLimitError) throw error;
-      // 刷新本身失败或重试仍然 stale：继续换签名器
+    const refreshed = await this.operations.refresh(operationName, page);
+    const retried = await this.attemptGraphql<T>(operationName, page, variables, refreshed);
+    if (!retried.ok) {
+      throw this.toError(retried, operationName, 'after rediscovering the operation');
     }
-
-    // queryId 没问题，那就是签名链断了（key 轮换）
-    this.transaction = null;
-    const third = await this.attemptGraphql<T>(operationName, variables);
-    if (!third.ok) {
-      throw this.toError(third, operationName, 'after refreshing both the queryId table and the signer');
-    }
-    return third.data;
+    return retried.data;
   }
 
   /** 把失败结果翻译成带语义的异常。返回而非抛出，避免依赖 never 的控制流窄化。 */
@@ -233,7 +192,7 @@ export class XClient {
       case 'stale':
         return new XGraphqlError(
           'query_stale',
-          `${what} returned HTTP ${attempt.status}${suffix} even after refreshing the queryId table and rebuilding the signer: ${attempt.body.slice(0, 200)}`,
+          `${what} returned HTTP ${attempt.status}${suffix} even after rediscovering its queryId from the page: ${attempt.body.slice(0, 200)}`,
           attempt.status,
         );
       default:
@@ -247,64 +206,58 @@ export class XClient {
 
   private async attemptGraphql<T>(
     operationName: string,
+    page: PageSpec,
     variables: Record<string, unknown>,
+    known?: Operation,
   ): Promise<Attempt<T>> {
-    // operations / 签名器都依赖 x.com 的页面：cookie 失效时它们会以"结构变了"的形式失败。
-    // 准备阶段的异常先探一次会话，把归因校正到认证上，否则 agent 会以为是代码坏了。
-    let op;
+    const operation = known ?? (await this.operations.get(operationName, page));
+
+    // 页面模板在前，调用方的值覆盖同名键：模板里的 rawQuery/screenName 只是页面自己的参数
+    const merged = { ...operation.variables, ...variables };
+    const query = new URLSearchParams({ variables: JSON.stringify(merged) });
+    const path = `${GRAPHQL_BASE}/${operation.queryId}/${operation.operationName}`;
+
+    let res: Response;
     try {
-      op = await this.operations.get(operationName);
+      res = await this.fetcher(`${path}?${query}`, { headers: apiHeaders(this.config.cookies) });
     } catch (error) {
-      throw await this.enrichAuthError(error);
-    }
-
-    let tx;
-    try {
-      tx = await this.getTransaction();
-    } catch (error) {
-      throw await this.enrichAuthError(error);
-    }
-
-    const path = `/i/api/graphql/${op.queryId}/${op.operationName}`;
-
-    const query = new URLSearchParams({
-      variables: JSON.stringify(variables),
-      features: JSON.stringify(op.features),
-    });
-    if (op.fieldToggles.length > 0) {
-      query.set(
-        'fieldToggles',
-        JSON.stringify(Object.fromEntries(op.fieldToggles.map((name) => [name, true]))),
+      throw new XError(
+        'upstream',
+        `Could not reach x.com for ${operationName}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
 
-    const res = await this.fetcher(`${GRAPHQL_BASE}/${op.queryId}/${op.operationName}?${query}`, {
-      headers: apiHeaders(this.config.cookies, tx.generateTransactionId('GET', path)),
-    });
-
     if (!res.ok) return classify(res, await res.text().catch(() => ''));
-    const json = (await res.json()) as { data?: T };
+
+    const body = await res.text().catch(() => '');
+    let json: { data?: T; errors?: { message?: string }[] };
+    try {
+      json = JSON.parse(body) as { data?: T; errors?: { message?: string }[] };
+    } catch {
+      return { ok: false, kind: 'error', status: res.status, body: `response was not JSON: ${body.slice(0, 120)}` };
+    }
     if (!json.data) {
-      return { ok: false, kind: 'error', status: res.status, body: 'response had no data payload' };
+      const reason = json.errors?.[0]?.message ?? 'response had no data payload';
+      return { ok: false, kind: 'error', status: res.status, body: reason };
     }
     return { ok: true, data: json.data };
   }
 
-  // --- REST（v1.1 / v2：实测不需要签名，但仍带上） ---
+  // --- REST（v2 / v1.1：实测不需要签名，也不需要 operation） ---
 
   async rest<T>(path: string, params: Record<string, string | number> = {}): Promise<T> {
     const url = new URL(`https://x.com${REST_BASE}${path}`);
     for (const [key, value] of Object.entries(params)) url.searchParams.set(key, String(value));
 
-    let tx;
+    let res: Response;
     try {
-      tx = await this.getTransaction();
+      res = await this.fetcher(url.toString(), { headers: apiHeaders(this.config.cookies) });
     } catch (error) {
-      throw await this.enrichAuthError(error);
+      throw new XError(
+        'upstream',
+        `Could not reach x.com for ${path}: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
-    const res = await this.fetcher(url.toString(), {
-      headers: apiHeaders(this.config.cookies, tx.generateTransactionId('GET', path)),
-    });
 
     if (!res.ok) {
       const attempt = classify(res, await res.text().catch(() => ''));

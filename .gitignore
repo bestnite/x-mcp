@@ -1,4 +1,4 @@
-node_modules/
+node_modules
 dist/
 *.log
 
@@ -7,7 +7,5 @@ dist/
 .cookie.env
 *.cookie
 
-# tid 回归测试用的录制素材：x.com 的产物，不进 git。
-# expected.json（我们算出的 tid）会提交。
-test/fixtures/XClientTransactionId/*.js
-test/fixtures/XClientTransactionId/*.html
+# 本机工具目录（worktree、探针脚本），绝不入库
+.agents/

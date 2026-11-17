@@ -49,6 +49,7 @@ async function main(): Promise<void> {
     if (url.pathname === '/health') {
       return respondJson(res, 200, {
         status: 'ok',
+        // operation 在第一次工具调用时按页发现，这里只报已缓存的条数
         operations: client.operations.size,
         tools: 6,
       });
@@ -87,13 +88,11 @@ async function main(): Promise<void> {
     console.log(`x-mcp listening on http://${config.host}:${config.port}${MCP_PATH}`);
   });
 
-  // 预热不阻塞端口监听，失败只提示——首次工具调用会自行重试
+  // 探活不阻塞端口监听，失败只提示——首次工具调用会自己发现 operation 并重试
   void client
     .warmUp()
-    .then(({ operations, transactionReady }) => {
-      console.log(
-        `warm-up: ${operations} operations, signer ${transactionReady ? 'ready' : 'NOT ready (will retry on first call)'}`,
-      );
+    .then(({ authenticated, message }) => {
+      console.log(`warm-up: ${message}${authenticated ? '' : ' (read tools will fail until the cookies are replaced)'}`);
     })
     .catch((error: unknown) => {
       console.error('warm-up failed:', error instanceof Error ? error.message : String(error));

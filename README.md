@@ -12,7 +12,7 @@ no API key, no HTML scraping.
 |---|---|
 | `x_auth_status` | Check whether the configured session still works |
 | `x_user_lookup` | Profile by handle: bio, follower and post counts, verification, join date, avatar, banner |
-| `x_user_tweets` | A user's recent posts, newest first; retweets include the original post |
+| `x_user_tweets` | A user's own recent posts, newest first (X's profile "originals" timeline; quotes keep the quoted post) |
 | `x_home_timeline` | The authenticated account's "For you" feed |
 | `x_search` | Search posts, with X operators such as `from:`, `lang:`, `min_faves:` and `#tag` |
 | `x_tweet_detail` | A post with its reply conversation; supports paging |
@@ -155,7 +155,7 @@ returned rather than requesting more from the server.
 | `[err.auth_expired]` or `[err.auth_csrf]` | The session cookies are no longer valid. Copy both `auth_token` and `ct0` again from a signed-in browser, update them, and restart the client. |
 | `[err.auth_restricted]` | The account is locked, suspended, or not permitted to read the target. Resolve it on x.com; new cookies will not help. |
 | `[err.rate_limited]` | Wait until the time given in the message. |
-| `[err.query_stale]` or `[err.signer_broken]` | X changed its frontend and the server needs an update. See the developer documentation below. |
+| `[err.query_stale]` | The page no longer ships the GraphQL operation this server needs, or its query id stayed rejected after a rediscovery. X changed its front end; the server needs an update. See the developer documentation below. |
 | `[err.not_found]` | The handle or post id does not exist, or is not visible to this account. |
 | `[err.upstream]` | Transient. Retry once. |
 
@@ -165,18 +165,19 @@ without guessing.
 ## Limitations
 
 - **Read-only.** No posting, liking, bookmarking or direct messages.
-- **Unofficial API.** X can change it at any time. The server refreshes request identifiers
-  and rebuilds its request signer automatically, but a breaking change on X's side may still
-  require an update.
+- **Unofficial API.** X can change it at any time. The server rediscovers operation ids and
+  variables from x.com pages at runtime, but a front-end change that drops an operation
+  entirely still requires an update.
 - **Rate limits follow your account.** Heavy automated use may be throttled or flagged by X.
 - **Personal use.** Use your own account and stay within X's terms of service.
 
 ## Developer documentation
 
-- [docs/endpoints.md](docs/endpoints.md) — which endpoint serves what, and how X's response
-  shapes differ between versions
-- [docs/reverse-engineering.md](docs/reverse-engineering.md) — how the request signing header
-  was derived, the maintenance playbook, and the traps
+- [docs/endpoints.md](docs/endpoints.md) — which endpoint serves what, the `data` root of each
+  capability, and where post/user fields moved in the 2026-11 front end
+- [docs/reverse-engineering.md](docs/reverse-engineering.md) — how an operation's query id and
+  variables are discovered, the failure taxonomy, the maintenance playbook, and the retired
+  request-signing scheme
 
 ## License
 

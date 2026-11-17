@@ -1,8 +1,9 @@
 /**
  * X 内部接口的请求头与错误类型。
  *
- * bearer 是网页端的公开常量（不是密钥），从任何客户端源码 grep `AAAAAAAAAAAAAAAAAAAAA` 即可；
- * 真正会过期的是 cookie，真正会变的是 x-client-transaction-id 与 queryId。
+ * bearer 是网页端的公开常量（不是密钥），从任何客户端源码 grep `AAAAAAAAAAAAAAAAAAAAA` 即可。
+ * 2026-11 起请求只剩三样会变的东西：cookie（会过期）、queryId（跟版轮换），
+ * 以及页面自带的变量模板——签名头 `x-client-transaction-id` 已经不需要了。
  */
 import type { SessionCookies } from '../config.js';
 
@@ -21,7 +22,7 @@ export const REST_BASE = '/i/api';
  * 错误分类，按「谁能修」划分——调用方是 agent，它要把原因和下一步原样转告用户：
  * - auth_*：只有用户能修（重新登录、换 cookie），agent 重试无用。
  * - rate_limited：等时间即可。
- * - query_stale / signer_broken：只有维护者能修（跟版改代码），agent 重试无用。
+ * - query_stale：只有维护者能修（跟版改代码），agent 重试无用。
  * - upstream：网络或 X 侧故障，可重试。
  */
 export type XErrorCode =
@@ -34,10 +35,8 @@ export type XErrorCode =
   /** 403 其它：账号被锁、被挂起、无权限 */
   | 'auth_restricted'
   | 'rate_limited'
-  /** 404/422，且刷新 queryId、重建签名器后仍失败 */
+  /** 404/422，且重挖一次 queryId 后仍失败 */
   | 'query_stale'
-  /** 签名器构建失败（X 改了前端签名链） */
-  | 'signer_broken'
   /** 目标不存在（用户不存在、推文已删） */
   | 'not_found'
   /** 其它上游错误：网络、5xx */
@@ -55,7 +54,7 @@ export function cookieHeader(cookies: SessionCookies): string {
   return parts.join('; ');
 }
 
-/** 抓网页资源（首页、main.js）用的头：不带 authorization，行为最接近浏览器。 */
+/** 抓页面（发现 operation 用）的头：不带 authorization，行为最接近浏览器。 */
 export function webHeaders(cookies: SessionCookies): Record<string, string> {
   return {
     'user-agent': USER_AGENT,
@@ -64,9 +63,9 @@ export function webHeaders(cookies: SessionCookies): Record<string, string> {
   };
 }
 
-/** 调内部 API 用的头。transactionId 由调用方补。 */
-export function apiHeaders(cookies: SessionCookies, transactionId?: string): Record<string, string> {
-  const headers: Record<string, string> = {
+/** 调内部 API 用的头：cookie + 公开 bearer + csrf，不再需要签名头。 */
+export function apiHeaders(cookies: SessionCookies): Record<string, string> {
+  return {
     ...webHeaders(cookies),
     authorization: `Bearer ${WEB_BEARER}`,
     'x-csrf-token': cookies.ct0,
@@ -77,8 +76,6 @@ export function apiHeaders(cookies: SessionCookies, transactionId?: string): Rec
     accept: '*/*',
     referer: 'https://x.com/',
   };
-  if (transactionId) headers['x-client-transaction-id'] = transactionId;
-  return headers;
 }
 
 export class XError extends Error {

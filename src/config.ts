@@ -20,7 +20,7 @@ export interface Config {
   cookies: SessionCookies;
   host: string;
   port: number;
-  /** operations 表的缓存时长；过期后从 main.js 重新提取。 */
+  /** operation 发现的缓存时长；过期后重新去页面挖 queryId。 */
   operationsTtlMs: number;
 }
 
@@ -66,6 +66,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     },
     host: pick('X_MCP_HOST') ?? '127.0.0.1',
     port: Number(pick('X_MCP_PORT') ?? 8787),
-    operationsTtlMs: Number(pick('X_OPERATIONS_TTL_MS') ?? 6 * 60 * 60 * 1000),
+    operationsTtlMs: Number(pick('X_OPERATIONS_TTL_MS') ?? 10 * 60 * 1000),
   };
 }

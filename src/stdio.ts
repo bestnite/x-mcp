@@ -22,13 +22,11 @@ async function main(): Promise<void> {
   await server.connect(new StdioServerTransport());
   console.error('x-mcp: stdio transport ready');
 
-  // 预热不阻塞第一条请求；失败只提示，首次调用会自行重建
+  // 探活不阻塞第一条请求；失败只提示，首次调用会自己发现 operation
   void client
     .warmUp()
-    .then(({ operations, transactionReady }) => {
-      console.error(
-        `x-mcp: warm-up ${operations} operations, signer ${transactionReady ? 'ready' : 'NOT ready'}`,
-      );
+    .then(({ authenticated, message }) => {
+      console.error(`x-mcp: warm-up — ${message}${authenticated ? '' : ' (read tools will fail until the cookies are replaced)'}`);
     })
     .catch((error: unknown) => {
       console.error('x-mcp: warm-up failed:', error instanceof Error ? error.message : String(error));

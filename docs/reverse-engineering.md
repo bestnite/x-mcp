@@ -1,243 +1,163 @@
-# Reverse-engineering `x-client-transaction-id`
+# How x-mcp finds X's GraphQL operations
 
-This document records **how** the transaction-id generator in `src/tid/` was derived, not
-just what it computes. The goal is that the next person — or the next version of us —
-can repair it when X changes its frontend without starting over.
+This server is read-only and unofficial: it calls the same internal API the X web app calls.
+Two things have to be rediscovered whenever X ships a front-end build — which operation id
+sits behind each read, and which variables that operation expects. This document records how
+that discovery works now, what it looked like before, and how to repair it.
 
-Kept method-first on purpose: it describes the asset chain, the regular expressions, the
-numeric pipeline and the verification trick. It does **not** paste X's JavaScript; the
-recorded assets are gitignored (see [Hygiene](#9-hygiene-and-legal)).
+Kept method-first on purpose. It describes the anchor points in X's markup and the rules for
+walking them, not X's code; recorded assets stay out of git (see [Hygiene](#7-hygiene)).
 
 ---
 
-## 0. What the output looks like
+## 0. What changed in November 2026
 
-| Property | Value | How it is known |
+Two independent mechanisms broke in the same deploy, and both are worth knowing because the
+old one may come back:
+
+| | Until 2026-10 | Since 2026-11 |
 |---|---|---|
-| Header length | 94 base64 characters | measured on a live 200 response |
-| Payload before base64 | 70 bytes | 1 + 48 + 4 + 16 + 1 |
-| Verification key | 48 bytes | base64-decoded `meta[twitter-site-verification]` |
-| Base64 flavour | standard, padding stripped | payload contains `+` and `/`, trailing `=` removed |
+| Operation ids | mined from the webpack module table in `main.js` (~104 entries) | embedded in the SSR document of the page that needs the data |
+| Request signing | `x-client-transaction-id` header, mandatory (no header → HTTP 404) | not required at all (with or without → HTTP 200) |
+| Response shapes | `legacy.*` carried text and counts | `details.*`, `counts.*`, `media_entities2`, `reply_to_results` |
 
-The 70 bytes and the 94 characters corroborate each other, which is a useful sanity check
-when touching the layout: if the length changes, the layout changed.
+The break is visible from the outside: `x.com/home` no longer references any `main.js`; it
+loads `https://abs.twimg.com/x-web/x-web/entry-client-<hash>.js`. The old signer chain
+(`entry-client` → `startup-dynamic`/`client-transaction-id-plugin` → `sign.o-*`) no longer
+exists, so `ClientTransaction.initialize()` failed with *"Couldn't find the sign module
+importer"* — that was the 404-free but total outage the server had before this rewrite.
 
-## 1. Proof that the header is mandatory
-
-Before reverse-engineering anything, establish the failure mode. With a valid
-`auth_token` + `ct0` cookie and every other header in place:
-
-```
-GET /i/api/graphql/<queryId>/SearchTimeline  with x-client-transaction-id  -> HTTP 200
-GET /i/api/graphql/<queryId>/SearchTimeline  without it                     -> HTTP 404
-```
-
-A 404 — not a 401, not a 403 — is what X returns for a request it refuses to even route.
-Two consequences:
-
-- The cookie alone is not sufficient; signing is a hard gate.
-- A 404 from this API is ambiguous. Absence of a transaction id, a stale `queryId`, and a
-  retired operation all look identical. Disambiguate by re-sending with a known-good
-  transaction id before blaming the endpoint.
-
-Legacy v1.1 endpoints (`/i/api/1.1/account/settings.json`, `verify_credentials.json`) answer
-`{"code":34}` and cannot be used to validate a session. GraphQL only.
-
-## 2. Finding the code that produces it
-
-The signer is not in one file. X loads it through a chain, and the chain is discoverable
-from the homepage alone:
+Measured on 2026-11-17, same cookies, same query id:
 
 ```
-https://x.com/home
-  └─ <script> pointing at  …/entry-client-<hash>.js          (absolute URL, abs.twimg.com)
-       └─ "./assets/startup-dynamic-<hash>.js"               (or client-transaction-id-plugin-*)
-            └─ "./sign.o-<hash>.js"                          (the signer itself)
+GET /i/api/graphql/<id>/SearchByRawQuery  with x-client-transaction-id    → 200
+GET /i/api/graphql/<id>/SearchByRawQuery  without it                      → 200
+GET /i/api/2/timeline/home.json                                          → 200
+GET /i/api/1.1/trends/place.json?id=1                                    → 200
 ```
 
-Each hop is a regex over the previous response:
+## 1. Where an operation lives now
 
-| Hop | Pattern (simplified) |
-|---|---|
-| homepage → entry | `["'](https://abs\.twimg\.com/[^"']+/entry-client[\w-]*\.js)["']` |
-| entry → importer | `["']([./\w-]*(?:client-transaction-id-plugin\|startup-dynamic)-[\w-]+\.js)["']` |
-| importer → signer | `["'`]([./\w-]*sign\.o-[\w-]+\.js)["'`]` |
-
-Two lessons worth keeping:
-
-- **Resolve relative to the URL that contained the reference**, not to a fixed base. The
-  entry script lives at `/x-web/x-web/`, the importer at `/x-web/x-web/assets/`.
-- **Do not hardcode the asset paths.** They are content-hashed and change frequently;
-  the file names in this repository's recordings are already obsolete.
-
-The signer is one of at least two chunk names (`ondemand.s` historically, `sign.o` now).
-Implementations that only look for `ondemand.s` break silently on the newer layout.
-
-## 3. The three inputs
-
-**a. Verification key** — `meta[name="twitter-site-verification"]`, `content` attribute,
-base64. Decoded it is 48 bytes. Match the *meta tag* and then extract `content`; the
-attribute order is not stable, so a single regex over the whole tag is fragile.
-
-**b. Animation frames** — the homepage carries four elements
-`<svg id="loading-x-anim-N"><g><path …/><path d="M 10,30 C …"/></g></svg>`. The **second**
-`<path>` of each is the animation data; the first is the X logo.
-
-**c. Key-byte indices** — from the signer source, a run of repeated expressions of the form
-`(e[27], 16)`, `(e[4], 16)`, … The first index is the *row selector*, the rest multiply
-into the *frame time*.
+`x-web` server-renders the data a page needs, and the serialized document carries the relay
+operation that produced it. Two record formats appear, both in the same documents:
 
 ```
-indices = /\(\w{1}\[(\d{1,2})\],\s*16\)+/g   →  [27, 4, 16, 41]   (current shape)
-rowIndex         = indices[0]
-keyBytesIndices  = indices[1:]
-```
-An empty match set means the signer was rewritten — fail loudly, do not fall back.
-
-## 4. Deriving the animation key
-
-Given the frame row `frames` (a flat array of integers parsed from the path data):
-
-```
-frameRowIndex = keyBytes[5] % 16                      // note: 5, not rowIndex
-frameTime     = jsRound( Π (keyBytes[i] % 16) / 10 ) * 10
-targetTime    = frameTime / 4096
+A.  id:"<queryId>",name:"<OperationName>",variables:{ <JS object literal> }        ← search / profile pages
+B.  key:"<queryId>{<JSON>}",name:"<OperationName>"                                ← status / profile pages
 ```
 
-Parsing the path data has three non-obvious steps:
+Format A gives the variables as a JavaScript literal (bare keys, `!0`/`!1`, `void 0`,
+occasional `$R[n]` back-references). Format B gives them as JSON *inside* a JS string, so
+every inner quote is escaped and the payload ends at the first unescaped `"`.
 
-1. `d.substring(9)` strips the leading `M 10,30 C`.
-2. Split on `'C'` — each segment is one cubic.
-3. **Every** digit run in a segment becomes a number, including the numbers behind `h`
-   and `s` commands. They are not ignored; they are swallowed into the row as extra
-   values. Filtering them out shifts every subsequent column and breaks the result.
+Which page hides which operation, as of this build:
 
-Then the frame is interpreted as a CSS-like keyframe:
-
-| Field | From | Range mapping |
+| Page | Operations found | Format |
 |---|---|---|
-| fromColor | frames[0..2] + `1.0` | 0–255 |
-| toColor | frames[3..5] + `1.0` | 0–255 |
-| fromRotation | `0.0` | — |
-| toRotation | frames[6] | `solve(60, 360, floor)` |
-| curves | frames[7..] | `solve(isOdd(i) ? -1 : 0, 1, round2)` |
+| `GET /search?q=<q>&src=typed_query&f=live` | `SearchByRawQuery` | A |
+| `GET /<handle>` | `UserByScreenName`, `UserOriginalsTimeline` | A / B |
+| `GET /i/web/status/<id>` | `TweetDetail`, `TweetResultByRestId` | B |
 
-`solve(v, min, max, floor) = v * (max - min) / 255 + min`.
+`https://x.com/i/web/status/<id>` is deliberately used instead of `/<handle>/status/<id>`:
+it carries the same records without needing to know whose post it is. The homepage does
+**not** carry any of the six reads (its records are `viewerQuery`, `sidebarPaymentsQuery`,
+`pinnedTimelinesQuery`), which is why discovery is per-page rather than per-session.
 
-The curve array feeds a cubic-bezier solver that binary-searches until
-`|t - x(s)| < 1e-5`. **Keep that epsilon.** A "better" tolerance changes which `t` the
-colour and matrix are sampled at.
+## 2. Reading the payload without a JS engine
 
-Finally the key is the concatenation of:
+- **Braces must be scanned, not searched.** Variable templates contain URLs and quoted text;
+  slicing from the first `{` to the first `}` cuts the object in half. Walk the string,
+  tracking string quotes and escapes, and stop at the balancing brace.
+- **Format A needs a literal repair pass** before `JSON.parse`: `!0`/`!1` → `true`/`false`,
+  `void 0` → `null`, bare keys → quoted keys. A `$R[n]` reference points at another slot in
+  the same document and cannot be resolved locally — degrade it to `null` rather than
+  abandoning the operation; relay switches never use it.
+- **Format B needs the escaped-string boundary.** From the `{` after the query id, scan to the
+  first quote that is not preceded by a backslash, then unescape `\"` and `JSON.parse`.
+- **The name must be adjacent.** Format B records and relay *result* records share the
+  `key:"…{…}"` shape; the result form is
+  `key:"<queryId>{…}",result:$R[n]={kind:"Result.Ok",value:"…"}` with no `name`, so requiring
+  `,name:"<Op>"` immediately after the string is what tells them apart.
 
-- three colour channels as `Math.round(c).toString(16)` (lowercase, no zero padding),
-- four matrix values from `convertRotationToMatrix`, each `roundTo2 → abs → floatToHex`,
-  where a leading `.` (values < 1) is prefixed with `0` and lowercased, while values ≥ 1
-  keep uppercase `A–F`,
-- the literal `"0"`, `"0"`,
-- with all `.` and `-` characters finally removed.
+## 3. The variable template is not optional
 
-## 5. Assembling the transaction id
-
-```
-timeNow  = floor((now_ms - 1682924400 * 1000) / 1000)     // epoch 2023-05-01T07:00:00Z
-payload  = keyBytes (48) || timeNow (4, little-endian) || sha256(input)[0..16] || 0x03
-tid      = base64( randomByte || (payload XOR randomByte) )  // strip '='
-```
-
-```
-sha256 input = `${method}!${path}!${timeNow}${keyword}${animationKey}`
-keyword      = "obfiowerehiring"      // fixed suffix
-appended byte= 3                      // fixed, not random
-```
-
-`method` and `path` are the ones of the **request being signed** — `GET` and
-`/i/api/graphql/<queryId>/<OperationName>`. The same generator therefore has to be
-consulted per request, not once per session.
-
-The leading random byte is what makes two ids for the same request differ. That is by
-design; it also dictates how to compare them (see below).
-
-## 6. Ground truth instead of guessing
-
-The decisive technique: **run X's own signer in a real browser against a frozen clock and
-record its output**, then make our implementation reproduce those bytes offline.
-
-The recording procedure (originally performed for QuaX with a real Chrome instance):
-
-1. Load `x.com/home` and let the real site boot.
-2. Resolve the same asset chain, then execute the signer chunk inside the page.
-3. Call its export with a fixed `now` and a chosen `(method, path)`.
-4. Persist: the homepage HTML, every asset along the chain, the URL→file index, and the
-   produced id for each case.
-
-What that buys us: a deterministic fixture. `test/fixtures/XClientTransactionId/` holds two
-cases — `GET …/SearchTimeline` and `POST …/FavoriteTweet` — with `nowMs` pinned. Our test
-replays the recorded files through `fetchSources()` and asserts equality.
-
-**Comparing ids requires removing the randomness first:**
+Each record ships the exact variable object the page sent, including a batch of
+`__relay_internal__pv__*` switches. X validates them: dropping one answers
 
 ```
-payloadOf(id) = bytes(id)[1..]  each XOR'd with bytes(id)[0]
+422 {"errors":[{"code":"GRAPHQL_VALIDATION_FAILED","message":"must be defined",
+     "path":["variable","__relay_internal__pv__xclientsfeaturesappviewercansendmoneyrelayprovider"]}]}
 ```
 
-Two ids for the same request are only comparable after that step. Comparing raw strings
-would fail on every run.
+So the call spreads the template first and overrides only the keys the caller owns
+(`screenName`, `rawQuery`, `focalTweetId`, `count`, `cursor`, `product`). Two consequences:
 
-This is the difference between "looks plausible" and "is equivalent": the recorded cases
-are the only evidence that the numeric pipeline matches, and they caught every rounding
-and case-sensitivity trap below.
+- The template is per operation, not per caller — caching by operation name is correct even
+  when two users are looked up in a row.
+- A 422 on a freshly discovered operation almost always means the *variable names* changed
+  (`screen_name` → `screenName`, `userId` → `screenName`, …), not that the query id expired.
 
-**Our own verification, for the record** (2026-10-23): with the ported generator,
-`initialize` against the live site took ~2.1 s, produced a 94-character id, and
-`GET SearchTimeline` returned HTTP 200 with 5 tweets.
+## 4. Failure taxonomy
 
-## 7. Maintenance playbook
+| Observation | Meaning | Who can fix it |
+|---|---|---|
+| 401 / 403 on the page or the API | cookies dead or `ct0` mismatched | the user (new cookies) |
+| page serves `entry-client-logged-out` | signed-out page for these cookies | the user (new cookies) |
+| page has no record for the operation | x-web stopped shipping it / renamed it | a maintainer |
+| 404 / 422 from the API, twice | query id or variables changed | a maintainer |
+| 404 on a profile/status page | that account or post does not exist | the caller (wrong id) |
+| 429 | rate limit | wait |
+
+`404` and `422` are therefore never fatal on the first attempt: the client rediscovers the
+operation from the same page and retries exactly once. Anything else is reported as-is.
+
+## 5. Maintenance playbook
 
 | Symptom | Most likely cause | Where to look |
 |---|---|---|
-| `ClientTransactionIdError: Couldn't find the entry script` | homepage markup changed / bot-walled | `ENTRY_SCRIPT_REGEX`, and whether a 200 was even returned |
-| `Couldn't find the sign module importer` | chunk naming changed (`startup-dynamic` → ?) | `SIGN_IMPORTER_REGEX` |
-| `Couldn't find the sign module` | signer renamed (e.g. back to `ondemand.s`) | `SIGN_FILE_REGEX` |
-| `Couldn't get KEY_BYTE indices` | signer minified differently | `INDICES_REGEX` |
-| `Couldn't find the loading-x-anim frames` | animation markup moved into JS-rendered DOM | `get2dArray` |
-| Requests now 404 **with** a transaction id | algorithm changed | re-record fixtures, then diff the numeric stages |
-| `SourceFetchError` | network/503 | not a signing issue; retry |
+| `… no longer embeds the <Op> operation` | the page stopped shipping it, or the record format changed | `FORMAT_A` / `FORMAT_B` in `src/x/operations.ts`, and the page table above |
+| `422 … "must be defined", path:["variable","__relay_internal__pv__…"]` | the page template was not reused | the spread in `src/x/client.ts` `attemptGraphql` |
+| `422 … "must be defined", path:["variable","screenName"]` | variable renamed | compare the page literal with the call site in `src/x/api.ts` |
+| Posts come back with empty text / zero counts | field locations moved again | the field table in [endpoints.md](endpoints.md) §3 |
+| Timeline is empty but HTTP 200 | the `data` root moved (it did once: `user_result_by_screen_name…`) | the roots table in [endpoints.md](endpoints.md) §2 |
+| Signed-out page for cookies that were working an hour ago | they really did expire | ask the user for new ones |
 
-When re-recording, compare against the **old** recording first. If payloads for the old
-cases still match, the algorithm is intact and the failure is environmental.
+Debugging route: `XClient.graphql` is the single funnel, so a one-off script that calls it
+prints both the discovered operation and the raw response. `scripts/mcp-smoke.mjs` exercises
+all six tools end to end against a live server.
 
-## 8. Traps
+## 6. Retired: `x-client-transaction-id` (2026-10 → 2026-11)
 
-Collected the hard way; each one produces a valid-looking 94-character string that X rejects.
+The header was a 94-character base64 blob, mandatory for every GraphQL call, derived per
+request from four inputs: a 48-byte verification key from
+`meta[name="twitter-site-verification"]`, four animation frames scraped from
+`<svg id="loading-x-anim-N">`, byte indices mined out of the minified signer, and the request's
+own method and path. The payload was `key || timeNow(4, LE) || sha256(...)[0..16] || 0x03`,
+XOR-masked with a leading random byte, then base64 with padding stripped. `src/tid/` (483
+lines plus a recorded fixture harness) implemented it and matched X's own signer byte for byte.
 
-- **Rounding semantics differ per field.** `jsRound` is JS `Math.round` (half toward +∞,
-  so `-2.5 → -2`); `roundTo2` is Dart's `round()` (half away from zero). Dart's native
-  `round()` and Python's banker's rounding both disagree with JS on halves.
-- **`floatToHex` must stay a greedy loop.** `Number.prototype.toString(16)` decides its own
-  precision and casing; the algorithm depends on the exact digit count this loop emits.
-- **Case is not uniform.** Colour channels are lowercase; matrix hex is uppercase; only
-  the `0`-prefixed (sub-1) matrix values get lowercased.
-- **No zero padding.** `Math.round(9).toString(16)` is `"9"`, not `"09"`.
-- **`substring(9)` is positional**, not semantic. If the path prefix ever changes length,
-  this silently eats real data.
-- **`h`/`s` command numbers are data.** Do not filter them out as "non-curve" values.
-- **`keyBytes[5]` selects the frame**, while `keyBytes[rowIndex]` selects the row. They are
-  easy to swap and still produce output.
-- **Little-endian, 4 bytes, signed shift.** `(timeNow >> (i*8)) & 0xff` — use `Math.floor`
-  not `>>>` guards; in JS the shift is signed 32-bit, so mask after shifting.
-- **Base64, not base64url.** `+` and `/` are expected; only `=` is stripped.
-- **The trailing `0x03` is a constant**, not the random byte.
+It is recorded here because the deciding evidence was empirical, and the same evidence may
+have to be re-gathered if X ever reintroduces signing:
 
-## 9. Hygiene and legal
+- the header was required: identical request without it returned 404, not 401/403;
+- re-recording fixtures against a frozen clock was the only way to prove equivalence;
+- every failure mode looked identical (404 for "no header", "stale query id" and "retired
+  operation"), which is why the old code retried with a rebuilt signer before blaming the
+  endpoint.
 
-- Recorded assets (`home.html`, `*.js`) are **X Corp.'s code**. They are gitignored and
-  never committed. Only `expected.json` (ids we derived) and `sources.json` (a URL index)
-  are tracked.
-- Code in this repository is a **port** of prior MIT-licensed implementations, verified
-  against observed behaviour of X's own signer. Attribution chain is declared in each file
-  header: iSarabjitDhiman/XClientTransaction (Python) → Teskann/QuaX (Dart) → this project.
-  It is not a clean-room rewrite, and the MIT notices travel with it.
-- The signer is obfuscation for anti-automation, not a security boundary. Nothing here
-  bypasses authentication: it signs requests made with the account owner's own cookie.
-  Respect X's terms and rate limits; this is for personal, read-only access.
+Two things killed it: the build that carries the signer stopped being served (`sign.o-*`
+gone from the asset chain), and requests without the header started succeeding. Deleting the
+signer removed 643 lines of code and one permanent maintenance burden, and the server now
+depends on nothing that has to be re-derived numerically.
+
+If it comes back: `git log -- src/tid` has the implementation, this section has the layout
+and the traps (rounding semantics differ per field, `substring(9)` is positional, `h`/`s`
+command numbers are data, base64 not base64url).
+
+## 7. Hygiene
+
+- Recorded assets (`home.html`, `*.js`) are **X Corp.'s code**. They are gitignored and never
+  committed; only synthetic fixtures shaped like the real documents live in `test/`.
+- The discovery path is not a security boundary and does not bypass authentication — it reads
+  pages and endpoints the account owner's own browser session can read.
+- Respect X's terms and rate limits; this is for personal, read-only access.
