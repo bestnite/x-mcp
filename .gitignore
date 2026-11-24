@@ -9,3 +9,7 @@ dist/
 
 # 本机工具目录（worktree、探针脚本），绝不入库
 .agents/
+
+# 抓取的线上资源（X Corp. 代码），只在本机留档，永不提交
+# 见 docs/reverse-engineering.md 第 7 节
+test/fixtures/
